@@ -1,0 +1,6 @@
+{"results": [
+  {"check_id": "python.lang.security.audit.subprocess-shell-true", "extra": {"severity": "ERROR"}},
+  {"check_id": "a.b.weak-hash", "extra": {"severity": "WARNING"}},
+  {"check_id": "a.b.style", "extra": {"severity": "INFO"}},
+  {"check_id": "a.b.new-style-high", "extra": {"severity": "HIGH"}}],
+ "errors": [{"message": "parse error"}]}

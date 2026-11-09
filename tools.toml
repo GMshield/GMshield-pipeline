@@ -1,0 +1,27 @@
+# Pinned scanner images. Each is locked to a version released at least two weeks
+# before adoption AND to its content digest, so a re-tagged image can never slip in.
+# Trivy note: v0.69.4 was a malicious release (CVE-2026-33634, March 2026); never use it.
+
+[images]
+gitleaks = "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+semgrep  = "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"
+trivy    = "ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+zap      = "ghcr.io/zaproxy/zaproxy:2.17.0@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af"
+
+[semgrep]
+rulesets = ["p/default", "p/owasp-top-ten", "p/cwe-top-25"]
+
+# Hard time limits in seconds. A stage that exceeds its limit is stopped and counts as an error.
+[limits]
+build = 1800
+unit_tests = 1800
+gitleaks = 600
+semgrep = 1200
+trivy = 1200
+zap_active = 1800
+zap_passive = 900
+startup = 180                  # time for a container to become healthy
+zap_active_minutes = 10        # active-scan budget inside ZAP
+zap_spider_minutes = 2
+max_intermediate_commits = 20  # earlier commits in one push get a light scan each
+keep_images_per_service = 3

@@ -1,0 +1,3 @@
+# The pipeline repository has no service of its own: source checks only.
+[service]
+name = "pipeline"

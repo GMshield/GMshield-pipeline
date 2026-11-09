@@ -1,0 +1,2 @@
+[{"RuleID": "aws-access-token", "File": "config.py", "StartLine": 3, "Commit": "abcdef1234"},
+ {"RuleID": "generic-api-key", "File": "app.py", "StartLine": 9, "Commit": "abcdef1234"}]

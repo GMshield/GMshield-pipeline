@@ -1,0 +1,21 @@
+# GMshield pipeline contract: copy to .gmshield/pipeline.toml in an app repository.
+# Every key is optional; the values shown are the defaults unless noted.
+
+[service]
+name = "backend"            # default: repo name without "GMshield-"
+port = 0                    # HTTP port inside the container; 0 = no HTTP (skips DAST)
+health_path = "/"           # must answer 2xx/3xx when the app is ready
+
+[build]
+dockerfile = "Dockerfile"
+context = "."
+test_target = "test"        # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"                  # where ZAP starts crawling
+openapi = ""                # e.g. "/v3/api-docs": ZAP API scan instead of crawling (develop)
+
+[deploy]
+host_port = 0               # publish on 127.0.0.1:<host_port> in production; 0 = not published
+env = {}                    # non-secret settings, e.g. { SPRING_PROFILES_ACTIVE = "prod" }
+                            # secrets: ~/gmshield-ci/secrets/<service>.env on roberto-server

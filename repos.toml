@@ -1,0 +1,20 @@
+# Repositories watched by the GMshield CI/CD poller on roberto-server.
+# Public repos are fetched over HTTPS without credentials.
+
+org = "GMshield"
+branches = ["develop", "main"]       # develop: verify + gate; main: build, publish, deploy, DAST
+registry = "localhost:5000"           # production image registry (runs on roberto-server)
+prod_network = "rpg_default"          # Docker network shared with postgres, redis, qdrant
+ci_slice = "ci.slice"                 # cgroup for every CI container (capped, low priority)
+
+[[repo]]
+name = "GMshield-backend"
+
+[[repo]]
+name = "GMshield-frontend"
+
+[[repo]]
+name = "GMshield-worker"
+
+[[repo]]
+name = "GMshield-pipeline"

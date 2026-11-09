@@ -1,0 +1,5 @@
+{"site": [{"alerts": [
+  {"pluginid": "10038", "alert": "CSP Header Not Set", "riskcode": "2", "count": "3"},
+  {"pluginid": "40012", "alert": "Cross Site Scripting (Reflected)", "riskcode": "3", "count": "1"},
+  {"pluginid": "10021", "alert": "X-Content-Type-Options Missing", "riskcode": "1", "count": "2"},
+  {"pluginid": "10096", "alert": "Timestamp Disclosure", "riskcode": "0", "count": "1"}]}]}

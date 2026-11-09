@@ -1,0 +1,13 @@
+[service]
+name = "sample"
+port = 8080
+health_path = "/health"
+
+[build]
+test_target = "test"
+
+[dast]
+path = "/"
+
+[deploy]
+host_port = 18080

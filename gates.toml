@@ -1,0 +1,46 @@
+# GMshield quality gates: the thresholds a commit must meet.
+# develop: every gate below must pass, or the commit cannot be promoted to main.
+# main:    the code must already have passed on develop (same tree), the rebuilt image
+#          must pass [image], and the deployed app must pass [dast_main] or it is rolled back.
+#
+# Counts are findings at or above each severity. "fixable" means a fixed version exists.
+# Suppress a reviewed false positive in the app repo, never here:
+#   .gitleaksignore, .semgrepignore / nosemgrep comments, .trivyignore,
+#   .gmshield/zap-ignore.txt (one ZAP plugin id per line)
+
+# A scanner that crashes or times out blocks the commit (fail closed).
+fail_on_error = true
+
+[unit_tests]
+required = false        # true once every app has a "test" stage in its Dockerfile
+                        # (a test stage that exists and fails always blocks)
+
+[secrets]               # Gitleaks: any leaked credential blocks
+max_findings = 0
+
+[sast]                  # Semgrep: ERROR = high, WARNING = medium
+max_high = 0
+max_medium = 25
+
+[sca]                   # Trivy: vulnerable dependencies in source lockfiles
+max_critical = 0
+max_high = 0
+only_fixable = true     # unfixable CVEs are reported but do not block
+
+[iac]                   # Trivy: Dockerfile and infrastructure misconfigurations
+max_critical = 0
+max_high = 0
+
+[image]                 # Trivy: OS and library CVEs in the built container image
+max_critical = 0
+max_high = 0
+only_fixable = true
+
+[dast_develop]          # ZAP active scan of a throwaway staging copy (alert types)
+max_high = 0
+max_medium = 5
+
+[dast_main]             # ZAP passive baseline scan of production after deploy
+max_high = 0
+max_medium = 10
+rollback_on_fail = true
