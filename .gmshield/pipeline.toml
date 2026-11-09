@@ -1,3 +1,8 @@
-# The pipeline repository has no service of its own: source checks only.
+# The pipeline repository has no service of its own: source checks (and SonarQube) only.
+# On main, "deploy" means the runner on roberto-server fast-forwards itself to the new commit,
+# after the new code's unit tests pass.
 [service]
 name = "pipeline"
+
+[deploy]
+self_update = true

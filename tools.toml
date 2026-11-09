@@ -7,6 +7,8 @@ gitleaks = "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb1
 semgrep  = "semgrep/semgrep:1.182.0@sha256:4a34048c04fef049f71665047f074cffb00cc3d89482f965a5cd151d589237af"
 trivy    = "ghcr.io/aquasecurity/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
 zap      = "ghcr.io/zaproxy/zaproxy:2.17.0@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af"
+sonar_scanner = "sonarsource/sonar-scanner-cli:12.3.0.4285_8.1.0@sha256:47956b669bf486bdad919e1cbd0533223515aa0b6d1d31763e5a3754942df6d7"
+# The SonarQube server itself (26.10 Community Build + PostgreSQL 17) is pinned in sonarqube/compose.yaml.
 
 [semgrep]
 rulesets = ["p/default", "p/owasp-top-ten", "p/cwe-top-25"]
@@ -20,6 +22,9 @@ semgrep = 1200
 trivy = 1200
 zap_active = 1800
 zap_passive = 900
+sonar = 1800                   # SonarQube scanner run
+sonar_startup = 600            # SonarQube server start (about 90 s on roberto-server)
+sonar_processing = 600         # SonarQube background processing of a report
 startup = 180                  # time for a container to become healthy
 zap_active_minutes = 10        # active-scan budget inside ZAP
 zap_spider_minutes = 2

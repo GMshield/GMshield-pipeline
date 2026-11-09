@@ -10,14 +10,20 @@ from pathlib import Path
 UID = f"{os.getuid()}:{os.getgid()}"
 
 
-def sh(cmd: list[str], log: Path | None = None, timeout: int = 600) -> int:
-    """Run a command; output goes to `log` (appended). Returns exit code, 124 on timeout."""
+def sh(cmd: list[str], log: Path | None = None, timeout: int = 600, env: dict | None = None,
+       cwd: Path | None = None) -> int:
+    """Run a command; output goes to `log` (appended). Returns exit code, 124 on timeout.
+
+    `env` adds variables to the child's environment (never to the logged command line).
+    """
     out = open(log, "ab") if log else subprocess.DEVNULL
     try:
         if log:
             out.write(f"\n$ {' '.join(cmd)}\n".encode())
             out.flush()
-        return subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, timeout=timeout).returncode
+        full_env = {**os.environ, **env} if env else None
+        return subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, timeout=timeout,
+                              env=full_env, cwd=cwd).returncode
     except subprocess.TimeoutExpired:
         if log:
             out.write(f"\n!! timed out after {timeout}s\n".encode())
@@ -44,7 +50,9 @@ class Docker:
     def run(self, name: str, image: str, args: list[str], *, log: Path, timeout: int,
             mounts: list[tuple[Path | str, str, str]] = (), network: str | None = None,
             env: dict | None = None, user: str | None = UID, workdir: str | None = None,
-            entrypoint: str | None = None, detach: bool = False, extra: list[str] = ()) -> int:
+            entrypoint: str | None = None, detach: bool = False, extra: list[str] = (),
+            secret_env: dict | None = None) -> int:
+        """`secret_env` values reach the container without ever appearing on a command line or in logs."""
         cname = f"gmshield-ci-{self.run_id}-{name}"
         cmd = ["docker", "run", "--name", cname, "--label", "gmshield-ci=1", "--label", self.label,
                "--cgroup-parent", self.ci_slice]
@@ -55,6 +63,8 @@ class Docker:
             cmd += ["--network", network]
         for k, v in (env or {}).items():
             cmd += ["-e", f"{k}={v}"]
+        for k in (secret_env or {}):
+            cmd += ["-e", k]                       # value passed through the docker CLI's environment
         if user:
             cmd += ["--user", user]
         if workdir:
@@ -62,7 +72,7 @@ class Docker:
         if entrypoint is not None:
             cmd += ["--entrypoint", entrypoint]
         cmd += [*extra, image, *args]
-        rc = sh(cmd, log, timeout)
+        rc = sh(cmd, log, timeout, env=secret_env)
         if rc == 124:
             sh(["docker", "rm", "-f", cname], None, 60)
         return rc

@@ -1,5 +1,6 @@
 # GMshield quality gates: the thresholds a commit must meet.
-# develop: every gate below must pass, or the commit cannot be promoted to main.
+# develop: every gate below must pass (including SonarQube's), or the commit cannot be
+#          promoted to main; GitHub also refuses the develop -> main pull request.
 # main:    the code must already have passed on develop (same tree), the rebuilt image
 #          must pass [image], and the deployed app must pass [dast_main] or it is rolled back.
 #
@@ -21,6 +22,21 @@ max_findings = 0
 [sast]                  # Semgrep: ERROR = high, WARNING = medium
 max_high = 0
 max_medium = 25
+
+[sonar]                 # SonarQube: its quality gate must be OK (develop, full runs)
+# `python3 -m gmshield_ci sonar-setup` creates this gate in SonarQube and makes it the default.
+# Conditions apply to new code (everything added after a project's first analysis).
+# Ratings: 1 = A ... 5 = E. This list is the source of truth: after editing it, re-run
+# sonar-setup and the SonarQube gate is made to match exactly (edits made in the UI are undone).
+quality_gate = "GMshield"
+conditions = [
+  ["new_software_quality_security_rating", "GT", "1"],         # no new vulnerabilities
+  ["new_software_quality_reliability_rating", "GT", "1"],      # no new bugs
+  ["new_software_quality_maintainability_rating", "GT", "1"],  # technical debt on new code <= 5%
+  ["new_security_hotspots_reviewed", "LT", "100"],             # a person decides on every hotspot
+  ["new_duplicated_lines_density", "GT", "3"],
+  # ["new_coverage", "LT", "80"],                              # enable together with [unit_tests] required
+]
 
 [sca]                   # Trivy: vulnerable dependencies in source lockfiles
 max_critical = 0

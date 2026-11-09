@@ -1,9 +1,11 @@
-"""gmshield-ci command line.
+"""gmshield-ci command line (run on roberto-server, in ~/gmshield-ci/runner).
 
-  python3 -m gmshield_ci poll                        # what the systemd timer runs every minute
-  python3 -m gmshield_ci run GMshield-backend develop [--sha SHA]   # re-run by hand
-  python3 -m gmshield_ci status                      # last result per repo and branch
-  python3 -m gmshield_ci selftest                    # is the server ready?
+  python3 -m gmshield_ci poll                    # what the systemd timer runs every minute
+  python3 -m gmshield_ci run backend develop     # re-run a branch by hand (e.g. after a hotspot review)
+  python3 -m gmshield_ci status                  # last result per repo and branch
+  python3 -m gmshield_ci selftest                # is the server ready?
+  python3 -m gmshield_ci sonar-setup             # one-time SonarQube setup (idempotent)
+  python3 -m gmshield_ci sonar-delete KEY        # remove a SonarQube project (tests)
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ import json
 import sys
 import urllib.request
 
-from . import __version__, pipeline
+from . import __version__, github, pipeline, sonar
 from .config import load_settings
 from .dockerops import capture
 
@@ -36,6 +38,10 @@ def selftest() -> int:
     checks.append(("prod network", rc == 0, s.prod_network))
     rc, out = capture(["systemctl", "show", s.ci_slice, "-p", "MemoryMax", "--value"])
     checks.append(("ci slice", rc == 0 and out not in ("", "infinity"), f"{s.ci_slice} MemoryMax={out}"))
+    checks.append(("sonarqube stack", (sonar.SONAR_DIR / "compose.yaml").is_file(), str(sonar.SONAR_DIR)))
+    checks.append(("sonarqube token", bool(sonar._creds().get("SONAR_TOKEN")), str(sonar.CREDS)))
+    has_tok = github._token() is not None
+    checks.append(("github token", has_tok, str(github.TOKEN_FILE) if has_tok else "missing: no statuses/releases"))
     width = max(len(c[0]) for c in checks)
     for name, ok, info in checks:
         print(f"{'OK  ' if ok else 'FAIL'} {name:<{width}}  {info}")
@@ -53,16 +59,40 @@ def status() -> int:
     return 0
 
 
+def sonar_setup() -> int:
+    try:
+        for line in sonar.setup(load_settings().gates):
+            print(f"OK  {line}")
+        return 0
+    except sonar.SonarError as e:
+        print(f"FAIL {e}")
+        return 1
+    finally:
+        sonar.Session.close()
+
+
+def sonar_delete(key: str) -> int:
+    try:
+        code = sonar.delete_project(key)
+        print(f"delete {key}: HTTP {code}")
+        return 0 if code in (200, 204, 404) else 1
+    finally:
+        sonar.Session.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gmshield-ci", description=f"GMshield CI/CD {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("poll")
     r = sub.add_parser("run")
-    r.add_argument("repo")
+    r.add_argument("repo", help="GMshield-backend or just backend")
     r.add_argument("branch", choices=["develop", "main"])
     r.add_argument("--sha")
     sub.add_parser("status")
     sub.add_parser("selftest")
+    sub.add_parser("sonar-setup")
+    d = sub.add_parser("sonar-delete")
+    d.add_argument("key")
     a = p.parse_args(argv)
     if a.cmd == "poll":
         return pipeline.poll(load_settings())
@@ -70,6 +100,10 @@ def main(argv: list[str] | None = None) -> int:
         return pipeline.manual_run(load_settings(), a.repo, a.branch, a.sha)
     if a.cmd == "status":
         return status()
+    if a.cmd == "sonar-setup":
+        return sonar_setup()
+    if a.cmd == "sonar-delete":
+        return sonar_delete(a.key)
     return selftest()
 
 
