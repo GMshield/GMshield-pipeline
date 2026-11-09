@@ -79,6 +79,23 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.judge("promotion", {"promoted": False})[0], "failed")
         self.assertEqual(self.judge("promotion", {"promoted": True})[0], "passed")
 
+    def test_sonar_gate_ok_passes(self):
+        self.assertEqual(self.judge("sonar", {"status": "OK", "failed": []})[0], "passed")
+
+    def test_sonar_gate_error_blocks_with_reasons(self):
+        status, _, reasons = self.judge("sonar", {"status": "ERROR", "hotspots_to_review": 2,
+                                                  "failed": ["new_security_hotspots_reviewed = 0.0 (fails when LT 100)"]})
+        self.assertEqual(status, "failed")
+        self.assertIn("2 security hotspot(s) await review in SonarQube", reasons)
+
+    def test_sonar_without_verdict_fails_closed(self):
+        self.assertEqual(self.judge("sonar", {"status": "NONE"})[0], "failed")
+
+    def test_sonar_gate_defined_in_config(self):
+        metrics = [c[0] for c in GATES["sonar"]["conditions"]]
+        self.assertIn("new_security_hotspots_reviewed", metrics)
+        self.assertIn("new_software_quality_security_rating", metrics)
+
 
 class ContractTest(unittest.TestCase):
     def test_sample_app_contract(self):
@@ -92,6 +109,11 @@ class ContractTest(unittest.TestCase):
             c = load_contract(Path(d), "GMshield-Worker")
         self.assertFalse(c.present or c.has_dockerfile or c.http)
         self.assertEqual(c.service, "worker")
+
+    def test_pipeline_repo_self_updates(self):
+        c = load_contract(RUNNER_DIR, "GMshield-pipeline")
+        self.assertTrue(c.self_update)
+        self.assertFalse(load_contract(FIX / "sample-app", "GMshield-sample").self_update)
 
     def test_dockerfile_outside_repo_is_ignored(self):
         with tempfile.TemporaryDirectory() as d:

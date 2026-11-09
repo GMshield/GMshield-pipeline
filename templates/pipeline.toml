@@ -10,6 +10,9 @@ health_path = "/"           # must answer 2xx/3xx when the app is ready
 dockerfile = "Dockerfile"
 context = "."
 test_target = "test"        # Dockerfile stage that runs the unit tests
+# Optional "test-reports" stage (FROM scratch): its files land in the artifacts and, for SonarQube,
+# in .gmshield-reports/ (Java: put compiled classes in classes/; point coverage paths there from
+# sonar-project.properties, e.g. sonar.coverage.jacoco.xmlReportPaths=.gmshield-reports/jacoco.xml)
 
 [dast]
 path = "/"                  # where ZAP starts crawling

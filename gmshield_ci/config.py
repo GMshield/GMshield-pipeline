@@ -89,6 +89,7 @@ class Contract:
     openapi: str = ""             # e.g. /v3/api-docs -> ZAP API scan on develop
     host_port: int = 0            # 127.0.0.1:<host_port> in production; 0 = not published
     env: dict = field(default_factory=dict)
+    self_update: bool = False     # GMshield-pipeline only: deploying = updating the runner itself
     dockerfile_stages: list[str] = field(default_factory=list)
     has_dockerfile: bool = False
 
@@ -118,6 +119,7 @@ def load_contract(src: Path, repo_name: str) -> Contract:
         c.openapi = str(dast.get("openapi", ""))
         c.host_port = int(deploy.get("host_port", 0))
         c.env = {str(k): str(v) for k, v in deploy.get("env", {}).items()}
+        c.self_update = bool(deploy.get("self_update", False))
     df = (src / c.context / c.dockerfile).resolve()
     if df.is_file() and src.resolve() in df.parents:
         c.has_dockerfile = True

@@ -30,12 +30,18 @@ export GMSHIELD_HOME=$T/home GMSHIELD_REPOS=$T/repos.toml
 cd "$RUNNER"
 result() { python3 -c "import json,sys;print(json.load(open('$T/home/state/state.json'))['GMshield-sample']['$1']['result'])"; }
 check() { local got; got=$(result "$1"); if [ "$got" = "$2" ]; then echo "  OK   $1 = $got"; else echo "  FAIL $1 = $got (expected $2)"; FAILED=1; fi; }
+stage() { python3 -c "import json,sys;d=json.load(open('$T/home/artifacts/GMshield-sample/$1/latest/summary.json'));print(next((s['status'] for s in d['stages'] if s['key']=='$2'),'missing'))"; }
+check_stage() { local got; got=$(stage "$1" "$2"); if [ "$got" = "$3" ]; then echo "  OK   $1 stage $2 = $got"; else echo "  FAIL $1 stage $2 = $got (expected $3)"; FAILED=1; fi; }
+sonar_running() { [ "$(docker inspect -f '{{.State.Running}}' gmshield-sonarqube 2>/dev/null)" = "true" ]; }
 FAILED=0
+python3 -m gmshield_ci sonar-delete GMshield-sample >/dev/null   # leftover from an earlier test run, if any
 
 echo "== 1. clean commit"
 python3 -m gmshield_ci poll
 check develop passed
+check_stage develop sonar passed
 check main passed
+sonar_running && { echo "  FAIL SonarQube left running"; FAILED=1; } || echo "  OK   SonarQube stopped after the poll"
 curl -fsS http://127.0.0.1:18080/health >/dev/null && echo "  OK   production answers on 127.0.0.1:18080" || { echo "  FAIL production not reachable"; FAILED=1; }
 
 echo "== 2. vulnerable commit on develop"
@@ -48,6 +54,7 @@ printf 'requests==2.19.0\nurllib3==1.24.1\n' > "$WC/requirements.txt"
 G add -A; G commit -qm "vulnerable change"; G push -q origin HEAD:develop
 python3 -m gmshield_ci poll
 check develop failed
+check_stage develop sonar failed
 
 echo "== 3. merge the vulnerable code into main"
 G push -q origin HEAD:main
@@ -58,4 +65,5 @@ curl -fsS http://127.0.0.1:18080/health >/dev/null && echo "  OK   production st
 echo "== artifacts"
 find "$T/home/artifacts" -maxdepth 3 -mindepth 3 | sort
 docker rm -f gmshield-sample >/dev/null 2>&1 || true
+python3 -m gmshield_ci sonar-delete GMshield-sample >/dev/null
 [ "$FAILED" = 0 ] && echo "E2E PASSED" || { echo "E2E FAILED"; exit 1; }

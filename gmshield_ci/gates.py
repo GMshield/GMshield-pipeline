@@ -115,6 +115,12 @@ def judge(kind: str, outcome: str, metrics: dict, gates: dict) -> tuple[str, str
         threshold = f"high <= {g.get('max_high', 0)}, medium <= {g.get('max_medium', 25)}"
         reasons += _over("high", metrics["high"], g.get("max_high", 0))
         reasons += _over("medium", metrics["medium"], g.get("max_medium", 25))
+    elif kind == "sonar":
+        threshold = f"SonarQube quality gate '{g.get('quality_gate', 'GMshield')}' is OK"
+        if metrics.get("status") != "OK":
+            reasons += metrics.get("failed") or [f"quality gate status {metrics.get('status', 'NONE')}"]
+            if metrics.get("hotspots_to_review"):
+                reasons.append(f"{metrics['hotspots_to_review']} security hotspot(s) await review in SonarQube")
     elif kind == "promotion":
         threshold = "same tree passed develop"
         if not metrics.get("promoted"):

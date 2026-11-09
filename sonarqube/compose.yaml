@@ -1,0 +1,57 @@
+# SonarQube for the GMshield pipeline (Community Build, on roberto-server).
+# The pipeline starts it for the SonarQube stage of each develop run and stops it afterwards,
+# so its ~2.5 GB of memory is free the rest of the time. No restart policy on purpose.
+# Deployed to ~/gmshield-ci/sonarqube/ with a .env holding SONAR_DB_PASSWORD (mode 600).
+# Web UI (while running): ssh -L 9000:127.0.0.1:9000 roberto-server, then http://localhost:9000
+name: gmshield-sonar
+
+services:
+  sonar-db:
+    image: postgres:17.10-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    container_name: gmshield-sonar-db
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_DB: sonarqube
+      POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:?set in .env}
+    volumes: ["sonar_db:/var/lib/postgresql/data"]
+    networks: [sonar]
+    cgroup_parent: ci.slice
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  sonarqube:
+    image: sonarqube:26.10.0.133078-community@sha256:f95aaa9016dd4e92c7d70691167a6d96dbb5d8acffd61eba1cb4335d364a7840
+    container_name: gmshield-sonarqube
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: ${SONAR_DB_PASSWORD}
+      SONAR_TELEMETRY_ENABLE: "false"
+    ports: ["127.0.0.1:9000:9000"]
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+    ulimits:
+      nofile: {soft: 131072, hard: 131072}
+      nproc: 8192
+    networks: [sonar]
+    cgroup_parent: ci.slice
+    mem_limit: 3g
+
+networks:
+  sonar:
+    name: gmshield-sonar
+
+volumes:
+  sonar_db: {}
+  sonar_data: {}
+  sonar_extensions: {}
+  sonar_logs: {}

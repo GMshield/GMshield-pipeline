@@ -4,6 +4,7 @@ from __future__ import annotations
 import fcntl
 import json
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -12,9 +13,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import github, gitops, report, stages
-from .config import Contract, Repo, Settings, load_contract
-from .dockerops import Docker, cleanup_label, prune_images, sh
+from . import github, gitops, report, sonar, stages
+from .config import RUNNER_DIR, Contract, Repo, Settings, load_contract
+from .dockerops import Docker, capture, cleanup_label, prune_images, sh
 
 TITLES = {"sca": "SCA & SBOM (Trivy)", "iac": "IaC misconfiguration (Trivy)"}
 
@@ -67,6 +68,10 @@ class Run:
     @property
     def prod_name(self) -> str:
         return f"gmshield-{self.contract.service}"
+
+    @property
+    def on_github(self) -> bool:
+        return self.repo.url.startswith("https://github.com/")
 
     def log(self, msg: str) -> None:
         line = f"{now():%H:%M:%S}Z [{self.repo.name}/{self.branch}@{self.short}] {msg}"
@@ -150,6 +155,7 @@ def develop_flow(run: Run) -> None:
         if run.old and gitops.is_ancestor(run.mirror, run.old, run.sha):
             run.log_opts = f"{run.old}..{run.sha}"
         _source_checks(run, with_tests=True)
+        stages.execute(run, "sonar", "SAST & quality (SonarQube)", "sonar", sonar.analyze)
         stages.execute(run, "image", "Container image (build, SBOM & scan)", "image", stages.image)
         stages.execute(run, "dast", "DAST (OWASP ZAP, active, staging)", "dast_develop", stages.dast_staging)
     run.result = "passed" if _passed(run) else "failed"
@@ -183,10 +189,32 @@ def main_flow(run: Run) -> None:
             if dast.status == "failed" and run.s.gates.get("dast_main", {}).get("rollback_on_fail", True):
                 msg = stages.rollback(run, run.dir / "deploy.log")
                 run.notes.append(f"Post-deploy DAST failed: {msg}.")
+    elif run.contract.self_update and _passed(run):
+        stages.execute(run, "deploy", "Deploy (pipeline self-update)", None, _self_update)
     run.result = "passed" if _passed(run) else "failed"
     if run.result == "passed":
         stages.mark_prod(run)
         stages.execute(run, "release", "Release", None, _release)
+
+
+def _self_update(run: Run):
+    """GMshield-pipeline on main: fast-forward the live runner, after the new code's tests pass."""
+    if not (RUNNER_DIR / ".git").exists():
+        return "skipped", {}, [], "runner is not a git checkout"
+    _, url = capture(["git", "-C", str(RUNNER_DIR), "remote", "get-url", "origin"])
+    norm = lambda u: u.rstrip("/").removesuffix(".git").lower()
+    if norm(url) != norm(run.repo.url):
+        return "skipped", {}, [], "runner is not a checkout of this repository"
+    log = run.dir / "self-update.log"
+    if sh([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."], log, 300, cwd=run.src) != 0:
+        return "error", {"error": "new pipeline version failed its unit tests; runner not updated"}, \
+            ["self-update.log"], "unit tests failed; runner kept"
+    _, old = capture(["git", "-C", str(RUNNER_DIR), "rev-parse", "HEAD"])
+    if sh(["git", "-C", str(RUNNER_DIR), "fetch", "-q", "origin", "main"], log, 300) != 0 or \
+            sh(["git", "-C", str(RUNNER_DIR), "merge", "-q", "--ff-only", run.sha], log, 120) != 0:
+        return "error", {"error": "runner could not fast-forward"}, ["self-update.log"], "fast-forward failed"
+    return "ok", {"from": old, "to": run.sha}, ["self-update.log"], \
+        f"runner {old[:8]} -> {run.short} (active from the next poll)"
 
 
 def _release(run: Run):
@@ -203,7 +231,8 @@ def _release(run: Run):
     (rel / "RELEASE.md").write_text(
         f"# {run.repo.name} {tag}\n\n- Commit: `{run.sha}` {run.commit.get('subject', '')}\n"
         f"- Image: `{info['image'] or 'none (no Dockerfile)'}`\n- Pipeline run: [run/summary.md](run/summary.md)\n")
-    gh = github.create_release(run.s.org, run.repo.name, tag, run.sha, run.commit.get("subject", ""))
+    gh = (github.create_release(run.s.org, run.repo.name, tag, run.sha, run.commit.get("subject", ""))
+          if run.on_github else "skipped (not a GitHub repository)")
     return "ok", {"tag": tag, "github": gh}, [f"../../releases/{tag}/RELEASE.md"], \
         f"{tag}{' (GitHub release created)' if gh == 'created' else ''}"
 
@@ -214,7 +243,8 @@ def execute_run(s: Settings, repo: Repo, branch: str, sha: str, mirror: Path, mo
     t0 = time.monotonic()
     run.log(f"run {run.id} started ({mode})")
     context = f"gmshield-ci/{branch}"
-    if mode == "full":
+    report_status = mode == "full" and run.on_github
+    if report_status:
         github.status(s.org, repo.name, sha, "pending", context, f"roberto-server pipeline running ({run.id})")
     try:
         [res] = stages.execute(run, "resolve", "Resolve flow", None, _resolve)
@@ -238,10 +268,11 @@ def execute_run(s: Settings, repo: Repo, branch: str, sha: str, mirror: Path, mo
         if run.contract.service:
             prune_images(f"gmshield-ci/{run.contract.service}", s.limit("keep_images_per_service", 3))
         sh(["docker", "image", "prune", "-f", "--filter", "dangling=true"], None, 300)
-    if mode == "full":
+    if report_status:
         state = {"passed": "success", "blocked": "failure"}.get(run.result, "failure")
-        github.status(s.org, repo.name, sha, state, context,
-                      f"{run.result.upper()} on roberto-server ({run.id})"[:140])
+        blockers = [r.title for r in run.records if r.status == "failed"]
+        desc = f"{run.result.upper()} on roberto-server" + (f": {', '.join(blockers)}" if blockers else "")
+        github.status(s.org, repo.name, sha, state, context, desc[:140])
     run.log(f"run {run.id} finished: {run.result.upper()} in {run.seconds}s")
     return run
 
@@ -266,38 +297,59 @@ def poll(s: Settings) -> int:
         cleanup_label("gmshield-ci=1")        # leftovers of a crashed run, if any
         state_file = s.state_dir / "state.json"
         state = _read(state_file, {})
-        for repo in s.repos:
-            try:
-                mirror = gitops.sync_mirror(repo, s.mirrors)
-            except gitops.GitError as e:
-                log(f"{repo.name}: cannot sync mirror: {e}")
-                continue
-            for branch in s.branches:
-                sha = gitops.head(mirror, branch)
-                last = state.get(repo.name, {}).get(branch, {}).get("sha")
-                if not sha or sha == last:
+        try:
+            for repo in s.repos:
+                try:
+                    mirror = gitops.sync_mirror(repo, s.mirrors)
+                except gitops.GitError as e:
+                    log(f"{repo.name}: cannot sync mirror: {e}")
                     continue
-                log(f"{repo.name}/{branch}: {last[:8] if last else 'new'} -> {sha[:8]}")
-                run = process(s, repo, branch, mirror, last, sha)
-                state.setdefault(repo.name, {})[branch] = {"sha": sha, "run": run.id, "result": run.result,
-                                                          "at": now().isoformat()}
-                _write(state_file, state)
+                for branch in s.branches:
+                    sha = gitops.head(mirror, branch)
+                    last = state.get(repo.name, {}).get(branch, {}).get("sha")
+                    if not sha or sha == last:
+                        continue
+                    log(f"{repo.name}/{branch}: {last[:8] if last else 'new'} -> {sha[:8]}")
+                    run = process(s, repo, branch, mirror, last, sha)
+                    _record(state, state_file, run)
+        finally:
+            sonar.Session.close()             # stop SonarQube if this poll started it
         return 0
 
 
+def _record(state: dict, state_file: Path, run: Run) -> None:
+    state.setdefault(run.repo.name, {})[run.branch] = {"sha": run.sha, "run": run.id, "result": run.result,
+                                                       "at": now().isoformat()}
+    _write(state_file, state)
+
+
+def find_repo(s: Settings, name: str) -> Repo | None:
+    """Accepts GMshield-backend, gmshield-backend or just backend."""
+    n = name.lower()
+    return next((r for r in s.repos if r.name.lower() in (n, f"gmshield-{n}")), None)
+
+
 def manual_run(s: Settings, repo_name: str, branch: str, sha: str | None = None) -> int:
-    repo = next((r for r in s.repos if r.name.lower() == repo_name.lower()), None)
+    """Re-run a branch by hand, e.g. after reviewing SonarQube hotspots."""
+    repo = find_repo(s, repo_name)
     if not repo:
         log(f"unknown repo {repo_name}; known: {', '.join(r.name for r in s.repos)}")
         return 2
     with single_instance(s) as ok:
         if not ok:
-            log("another pipeline run is in progress; try again later")
+            log("another pipeline run is in progress; try again in a few minutes")
             return 1
-        mirror = gitops.sync_mirror(repo, s.mirrors)
-        target = sha or gitops.head(mirror, branch)
-        if not target:
-            log(f"{repo.name} has no branch {branch}")
-            return 2
-        run = execute_run(s, repo, branch, target, mirror, "full")
-        return 0 if run.result == "passed" else 1
+        try:
+            mirror = gitops.sync_mirror(repo, s.mirrors)
+            head = gitops.head(mirror, branch)
+            target = sha or head
+            if not target:
+                log(f"{repo.name} has no branch {branch}")
+                return 2
+            run = execute_run(s, repo, branch, target, mirror, "full")
+            if target == head:                # the re-run result becomes the branch's current result
+                state_file = s.state_dir / "state.json"
+                _record(_read(state_file, {}), state_file, run)
+            return 0 if run.result == "passed" else 1
+        finally:
+            sonar.Session.close()
