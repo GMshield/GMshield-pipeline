@@ -1,6 +1,7 @@
 """Settings (where things live, what to watch) and the per-repo pipeline contract."""
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import tomllib
@@ -47,6 +48,12 @@ class Settings:
     def cache(self) -> Path: return self.home / "cache"
     @property
     def secrets_dir(self) -> Path: return self.home / "secrets"
+
+    @property
+    def instance(self) -> str:
+        """Identifies this pipeline installation (by its home folder) on a shared Docker host,
+        so cleaning up after a crash never touches another installation's or a test's containers."""
+        return hashlib.sha1(str(self.home.resolve()).encode()).hexdigest()[:12]
 
     def limit(self, key: str, default: int) -> int:
         return int(self.limits.get(key, default))

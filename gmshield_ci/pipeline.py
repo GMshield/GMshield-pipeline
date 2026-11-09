@@ -44,7 +44,7 @@ class Run:
         self.records: list[stages.Record] = []
         self.lock = threading.Lock()
         self.titles = TITLES
-        self.docker = Docker(s.ci_slice, self.id)
+        self.docker = Docker(s.ci_slice, self.id, s.instance)
         self.contract = Contract()
         self.tree = ""
         self.commit: dict = {}
@@ -294,7 +294,7 @@ def poll(s: Settings) -> int:
         if not ok:
             log("another pipeline run is in progress; skipping this poll")
             return 0
-        cleanup_label("gmshield-ci=1")        # leftovers of a crashed run, if any
+        cleanup_label(f"gmshield-ci.instance={s.instance}")   # leftovers of this installation's crashed runs
         state_file = s.state_dir / "state.json"
         state = _read(state_file, {})
         try:

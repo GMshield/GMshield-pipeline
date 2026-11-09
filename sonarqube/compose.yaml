@@ -1,6 +1,8 @@
 # SonarQube for the GMshield pipeline (Community Build, on roberto-server).
 # The pipeline starts it for the SonarQube stage of each develop run and stops it afterwards,
 # so its ~2.5 GB of memory is free the rest of the time. No restart policy on purpose.
+# It runs in its own sonar.slice (capped by mem_limit below), not ci.slice, so a SonarQube left
+# open for a hotspot review never squeezes the scanners' memory budget.
 # Deployed to ~/gmshield-ci/sonarqube/ with a .env holding SONAR_DB_PASSWORD (mode 600).
 # Web UI (while running): ssh -L 9000:127.0.0.1:9000 roberto-server, then http://localhost:9000
 name: gmshield-sonar
@@ -15,7 +17,7 @@ services:
       POSTGRES_PASSWORD: ${SONAR_DB_PASSWORD:?set in .env}
     volumes: ["sonar_db:/var/lib/postgresql/data"]
     networks: [sonar]
-    cgroup_parent: ci.slice
+    cgroup_parent: sonar.slice
     mem_limit: 384m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
@@ -43,7 +45,7 @@ services:
       nofile: {soft: 131072, hard: 131072}
       nproc: 8192
     networks: [sonar]
-    cgroup_parent: ci.slice
+    cgroup_parent: sonar.slice
     mem_limit: 3g
 
 networks:

@@ -42,10 +42,15 @@ def capture(cmd: list[str], timeout: int = 120) -> tuple[int, str]:
 
 
 class Docker:
-    def __init__(self, ci_slice: str, run_id: str):
+    def __init__(self, ci_slice: str, run_id: str, instance: str):
         self.ci_slice = ci_slice
         self.run_id = run_id
         self.label = f"gmshield-ci.run={run_id}"
+        self.instance_label = f"gmshield-ci.instance={instance}"
+
+    @property
+    def labels(self) -> list[str]:
+        return ["--label", "gmshield-ci=1", "--label", self.instance_label, "--label", self.label]
 
     def run(self, name: str, image: str, args: list[str], *, log: Path, timeout: int,
             mounts: list[tuple[Path | str, str, str]] = (), network: str | None = None,
@@ -54,8 +59,7 @@ class Docker:
             secret_env: dict | None = None) -> int:
         """`secret_env` values reach the container without ever appearing on a command line or in logs."""
         cname = f"gmshield-ci-{self.run_id}-{name}"
-        cmd = ["docker", "run", "--name", cname, "--label", "gmshield-ci=1", "--label", self.label,
-               "--cgroup-parent", self.ci_slice]
+        cmd = ["docker", "run", "--name", cname, *self.labels, "--cgroup-parent", self.ci_slice]
         cmd += ["-d"] if detach else ["--rm"]
         for host, cont, mode in mounts:
             cmd += ["-v", f"{host}:{cont}:{mode}"]

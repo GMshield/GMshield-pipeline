@@ -88,6 +88,16 @@ def secrets(run: "Run"):
     return "ok", m, ["gitleaks.json", "gitleaks.log"], f"{m['findings']} finding(s), {scope}"
 
 
+CONTAINER_HOME = "/home/ci"
+
+
+def private_home(run: "Run", tool: str) -> tuple[Path, str, str]:
+    """A per-run, owner-only home folder for a tool container (instead of a shared /tmp)."""
+    d = run.work / "home" / tool
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return d, CONTAINER_HOME, "rw"
+
+
 def sast(run: "Run"):
     args = ["semgrep", "scan"]
     for rs in run.s.semgrep_rulesets:
@@ -96,8 +106,8 @@ def sast(run: "Run"):
              "--sarif-output=/out/semgrep.sarif", "--timeout=30", "--jobs=2", "--max-memory=1500", "/src"]
     rc = run.docker.run("semgrep", run.s.images["semgrep"], args, log=run.dir / "semgrep.log",
                         timeout=run.s.limit("semgrep", 1200),
-                        mounts=[(run.src, "/src", "ro"), (run.dir, "/out", "rw")],
-                        env={"HOME": "/tmp", "SEMGREP_SEND_METRICS": "off"}, workdir="/src")
+                        mounts=[(run.src, "/src", "ro"), (run.dir, "/out", "rw"), private_home(run, "semgrep")],
+                        env={"HOME": CONTAINER_HOME, "SEMGREP_SEND_METRICS": "off"}, workdir="/src")
     out = run.dir / "semgrep.json"
     if rc not in (0, 1) or not out.exists():
         return _error(f"semgrep exit {rc}", ["semgrep.log"])
@@ -112,8 +122,9 @@ def _trivy(run: "Run", name: str, args: list[str], extra_mounts=()) -> int:
         name, run.s.images["trivy"],
         [args[0], "--cache-dir", "/cache", "--skip-version-check", "--no-progress", "--timeout", "15m", *args[1:]],
         log=run.dir / "trivy.log", timeout=run.s.limit("trivy", 1200),
-        mounts=[(run.dir, "/out", "rw"), (run.s.cache / "trivy", "/cache", "rw"), *extra_mounts],
-        env={"HOME": "/tmp"}, workdir="/src" if args[0] == "fs" else None)
+        mounts=[(run.dir, "/out", "rw"), (run.s.cache / "trivy", "/cache", "rw"), private_home(run, "trivy"),
+                *extra_mounts],
+        env={"HOME": CONTAINER_HOME}, workdir="/src" if args[0] == "fs" else None)
 
 
 def sca_iac(run: "Run"):
@@ -257,7 +268,7 @@ def dast_staging(run: "Run"):
     outdir = run.dir / "dast"
     outdir.mkdir(parents=True, exist_ok=True)
     net = f"gmshield-ci-{run.id}"
-    sh(["docker", "network", "create", "--internal", "--label", "gmshield-ci=1", "--label", run.docker.label, net],
+    sh(["docker", "network", "create", "--internal", *run.docker.labels, net],
        outdir / "staging.log", 60)
     env = dict(c.env)
     rc = run.docker.run("app", run.local_image, [], log=outdir / "staging.log", timeout=120, network=net,

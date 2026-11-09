@@ -123,5 +123,27 @@ class ContractTest(unittest.TestCase):
         self.assertFalse(c.has_dockerfile)
 
 
+class SettingsTest(unittest.TestCase):
+    def test_instance_label_differs_per_installation(self):
+        """Crash cleanup is scoped by instance: a test install must never match the live one."""
+        import os
+        from gmshield_ci.config import load_settings
+        saved = os.environ.get("GMSHIELD_HOME")
+        try:
+            os.environ["GMSHIELD_HOME"] = "/tmp/gmshield-a"
+            a = load_settings().instance
+            os.environ["GMSHIELD_HOME"] = "/tmp/gmshield-b"
+            b = load_settings().instance
+            os.environ["GMSHIELD_HOME"] = "/tmp/gmshield-a"
+            a_again = load_settings().instance
+        finally:
+            if saved is None:
+                os.environ.pop("GMSHIELD_HOME", None)
+            else:
+                os.environ["GMSHIELD_HOME"] = saved
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, a_again)
+
+
 if __name__ == "__main__":
     unittest.main()
