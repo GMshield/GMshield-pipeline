@@ -19,6 +19,7 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import stages
 from .dockerops import sh
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -230,8 +231,10 @@ def analyze(run: "Run"):
     cache.mkdir(parents=True, exist_ok=True)
     rc = run.docker.run("sonar-scanner", run.s.images["sonar_scanner"], args, log=log,
                         timeout=run.s.limit("sonar", 1800), network=NETWORK, workdir="/usr/src",
-                        mounts=[(run.src, "/usr/src", "rw"), (cache, "/cache", "rw")],
-                        env={"SONAR_HOST_URL": INTERNAL_URL, "SONAR_USER_HOME": "/cache", "HOME": "/tmp"},
+                        mounts=[(run.src, "/usr/src", "rw"), (cache, "/cache", "rw"),
+                                stages.private_home(run, "sonar-scanner")],
+                        env={"SONAR_HOST_URL": INTERNAL_URL, "SONAR_USER_HOME": "/cache",
+                             "HOME": stages.CONTAINER_HOME},
                         secret_env={"SONAR_TOKEN": tok})
     task_file = run.src / ".scannerwork" / "report-task.txt"
     if rc != 0 or not task_file.is_file():

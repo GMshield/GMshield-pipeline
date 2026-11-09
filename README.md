@@ -52,7 +52,7 @@ the pipeline cannot decide alone: it blocks until you mark each one Safe, Fixed 
 SonarQube, then re-run the branch. Coverage (>= 80%) is listed but disabled until the apps have tests.
 
 ```
-ssh -L 9000:127.0.0.1:9000 roberto-server          # then open http://localhost:9000
+ssh -N -o ExitOnForwardFailure=no -L 9000:127.0.0.1:9000 roberto-server   # then http://localhost:9000
 # start it if the pipeline is not running it: cd ~/gmshield-ci/sonarqube && docker compose up -d
 # admin password: ~/gmshield-ci/sonarqube/credentials.env on roberto-server
 gmshield-results -b develop -r backend --rerun      # from the workstation, after the review
@@ -95,15 +95,25 @@ HTML/JSON/Markdown/XML, build and test logs). `artifacts/README.md` indexes all 
 `releases/<tag>/` records each production release.
 
 On the workstation, results are fetched by hand with
-[`workstation/gmshield-results.py`](workstation/gmshield-results.py) (installed as `gmshield-results`).
-Each call copies every new report into `~/agentic-RPG/docs/artifacts` (nothing is deleted) and shows:
+[`workstation/gmshield-results.py`](workstation/gmshield-results.py) (installed as `gmshield-results`;
+nothing is scheduled). Each call fetches new runs (raw copies kept in `~/.cache/gmshield/artifacts`)
+and files every run as one release folder in `~/agentic-RPG/docs`, separated by branch:
+
+```
+ci-cd/develop/release-develop-<YYYYMMDDTHHMMSSZ>/   RELEASE.md, release.json, artifacts/
+ci-cd/main/release-main-<YYYYMMDDTHHMMSSZ>/         RELEASE.md, release.json, artifacts/
+```
 
 | Command | Shows |
 |---|---|
 | `gmshield-results` | the latest result of every repo and branch |
-| `gmshield-results -b develop` | the most recent develop run of every repo, stage by stage |
+| `gmshield-results -b develop` | the most recent develop run of every repo, test by test |
 | `gmshield-results -b main -r backend` | the most recent main run of one repo |
+| `gmshield-results -b develop -t sonarqube` | one test (names: `--tests`), with threshold and report paths |
+| `gmshield-results --list` / `--release <folder>` | every release folder / one past run |
 | `gmshield-results -b develop -r backend --rerun` | re-runs it on the server first |
+
+`docs/CI-CD-RESULTS.md` in the workspace lists the command for every test on both branches.
 
 ## Operations (on roberto-server, in `~/gmshield-ci/runner`)
 
