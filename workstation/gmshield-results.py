@@ -17,12 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
 DEST = Path(os.environ.get("GMSHIELD_ARTIFACTS", Path.home() / "agentic-RPG" / "docs" / "artifacts"))
 HOST = os.environ.get("GMSHIELD_SERVER", "roberto-server")
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")   # repo, branch and host names: nothing a shell interprets
 SSH = ["ssh", "-o", "ClearAllForwardings=yes", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
 MARK = {"passed": "PASS", "failed": "FAIL", "skipped": "skip", "blocked": "BLOCKED"}
 
@@ -39,8 +42,14 @@ def fetch() -> int | None:
 
 
 def rerun(repo: str, branch: str) -> None:
+    # The remote side runs this through a shell: accept only plain names and quote them anyway.
+    for value in (repo, branch, HOST):
+        if not NAME.fullmatch(value):
+            sys.exit(f"refusing unsafe name: {value!r}")
+    remote = (f"cd ~/gmshield-ci/runner && python3 -m gmshield_ci run "
+              f"{shlex.quote(repo)} {shlex.quote(branch)}")
     print(f"re-running {repo} {branch} on {HOST} (this can take several minutes)...", flush=True)
-    subprocess.run(SSH + [HOST, f"cd ~/gmshield-ci/runner && python3 -m gmshield_ci run {repo} {branch}"])
+    subprocess.run(SSH + [shlex.quote(HOST), remote])
 
 
 def latest(repo_dir: Path, branch: str) -> dict | None:
