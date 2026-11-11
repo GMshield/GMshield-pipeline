@@ -123,9 +123,11 @@ ci-cd/main/release-main-<YYYYMMDDTHHMMSSZ>/         RELEASE.md, release.json, ar
 
 ### Dashboard on the server's screen
 
-roberto-server's own screen (tty1) shows a live, read-only status page: the latest full run of every
-repo and branch (PASSED, FAILED or BLOCKED, with the gate that stopped it), the run in progress and
-its last log line, the newest release and the most recent runs. It redraws every 5 seconds from
+roberto-server's own screen (tty1) shows a live, read-only status page split into a `develop` section
+and a `main` section (side by side on a wide screen, stacked otherwise). Each lists every repo's latest
+full run (PASSED, FAILED or BLOCKED) with one column per pipeline stage (`ok`, `FAIL`, `skip`, or `·`
+when the stage never ran), then what blocked it with the gate's reason, the run in progress with its
+last log line, and the branch's most recent runs; the `main` section also shows the newest release. It redraws every 5 seconds from
 `state/` and `artifacts/` only: it never takes the poll lock, calls GitHub or writes anything.
 Detailed reports still come through `gmshield-results`.
 

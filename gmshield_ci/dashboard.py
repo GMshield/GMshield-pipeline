@@ -1,8 +1,9 @@
 """Read-only terminal dashboard for roberto-server's own screen (tty1).
 
-Shows, per repo and branch, the latest full run (PASSED / FAILED / BLOCKED and the gate that stopped it),
-whether a run is in progress, the newest release and the most recent runs. It only reads the files the
-pipeline writes (state/, artifacts/); it never takes the poll lock, calls GitHub or changes anything.
+The screen is split into a develop section and a main section. Each shows, per repo, the latest full run
+(PASSED / FAILED / BLOCKED) with one column per pipeline stage, so the stage that failed stands out, then
+what blocked it and the branch's most recent runs. It only reads the files the pipeline writes (state/,
+artifacts/); it never takes the poll lock, calls GitHub or changes anything.
 
   python3 -m gmshield_ci dashboard           # full screen, redraws every few seconds (Ctrl+C to quit)
   python3 -m gmshield_ci dashboard --once    # print one frame and exit (e.g. over SSH)
@@ -22,8 +23,22 @@ from pathlib import Path
 
 from .config import Settings
 
-COLORS = {"green": "32;1", "red": "31;1", "yellow": "33;1", "cyan": "36;1", "dim": "2", "bold": "1"}
+COLORS = {"green": "32;1", "red": "31;1", "yellow": "33;1", "cyan": "36;1", "dim": "2", "bold": "1",
+          "alert": "97;41;1", "head": "30;47;1"}
 RESULT_COLOR = {"passed": "green", "failed": "red", "blocked": "red", "running": "yellow"}
+
+# Stage columns per branch, in pipeline order: (summary.json stage key, column label, meaning for the legend)
+STAGES = {
+    "develop": [("resolve", "Res", "resolve"), ("unit_tests", "Test", "unit tests"),
+                ("secrets", "Secr", "Gitleaks"), ("sca_iac:sca", "SCA", "Trivy deps"),
+                ("sca_iac:iac", "IaC", "Trivy IaC"), ("sast", "Semg", "Semgrep"),
+                ("sonar", "Sonr", "SonarQube"), ("image", "Img", "image"), ("dast", "DAST", "ZAP active")],
+    "main": [("resolve", "Res", "resolve"), ("promotion", "Prom", "passed develop"), ("image", "Img", "image"),
+             ("publish", "Publ", "registry"), ("deploy", "Depl", "deploy"), ("dast_prod", "DAST", "ZAP passive"),
+             ("release", "Rel", "release")],
+}
+CELL = {"passed": ("ok", "green"), "failed": ("FAIL", "alert"), "skipped": ("skip", "dim")}
+NOT_RUN = ("·", "dim")
 
 
 @dataclass
@@ -37,7 +52,7 @@ class Running:
 
 @dataclass
 class Snapshot:
-    latest: dict = field(default_factory=dict)      # (repo, branch) -> history row + "blockers"
+    latest: dict = field(default_factory=dict)      # (repo, branch) -> history row + "stages" + "blockers"
     recent: list = field(default_factory=list)      # (repo, branch, row), newest first
     release: tuple | None = None                    # (repo, row) of the newest release
     running: Running | None = None
@@ -72,18 +87,20 @@ def _parse_time(value: str | None) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def blockers(run_dir: Path) -> list[str]:
-    """'Stage title: first reason' for each stage that failed in a run's summary.json."""
+def stage_results(run_dir: Path) -> tuple[dict[str, str], list[str]]:
+    """({stage key: status}, ['Stage title: first reason' for each failed stage]) from a run's summary.json."""
     try:
         data = json.loads((run_dir / "summary.json").read_text())
     except (OSError, json.JSONDecodeError):
-        return []
-    out = []
+        return {}, []
+    statuses, failed = {}, []
     for st in data.get("stages", []):
-        if st.get("status") == "failed":
+        key, status = str(st.get("key", "")), str(st.get("status", ""))
+        statuses[key] = status
+        if status == "failed":
             reasons = st.get("reasons") or []
-            out.append(f"{st.get('title', st.get('key'))}" + (f": {reasons[0]}" if reasons else ""))
-    return out
+            failed.append(f"{st.get('title', key)}" + (f": {reasons[0]}" if reasons else ""))
+    return statuses, failed
 
 
 def lock_held(lock: Path, proc_locks: Path = Path("/proc/locks")) -> bool:
@@ -158,7 +175,7 @@ def collect(s: Settings, timer: bool = True) -> Snapshot:
                 continue
             full = [r for r in rows if r.get("mode") == "full"] or rows
             last = dict(full[-1])
-            last["blockers"] = blockers(hist.parent / last["run"]) if last["result"] != "passed" else []
+            last["stages"], last["blockers"] = stage_results(hist.parent / last["run"])
             snap.latest[(repo.name, branch)] = last
             snap.recent += [(repo.name, branch, r) for r in rows]
             for r in rows:
@@ -173,6 +190,10 @@ def collect(s: Settings, timer: bool = True) -> Snapshot:
 
 
 # ------------------------------------------------------------------ rendering (pure)
+# A line is a list of (text, style) segments, so widths can be measured without ANSI codes.
+
+Line = list
+
 
 def ago(t: datetime | None, now: datetime) -> str:
     if t is None:
@@ -199,109 +220,151 @@ def _dur(sec) -> str:
     return f"{sec // 60}m{sec % 60:02d}s" if sec >= 60 else f"{sec}s"
 
 
-class Painter:
-    def __init__(self, color: bool):
-        self.color = color
-
-    def __call__(self, text: str, style: str | None) -> str:
-        if not self.color or not style:
-            return text
-        return f"\033[{COLORS[style]}m{text}\033[0m"
+def _short(repo: str) -> str:
+    return repo.removeprefix("GMshield-")
 
 
-def _cell(text: str, width: int) -> str:
-    text = str(text)
-    return (text[: width - 1] + "…") if len(text) > width else text.ljust(width)
+def fit(line: Line, width: int) -> Line:
+    """Cut or pad a line to exactly `width` visible characters."""
+    out, used = [], 0
+    for text, style in line:
+        room = width - used
+        if room <= 0:
+            break
+        if len(text) > room:
+            text = text[: room - 1] + "…" if room > 1 else text[:room]
+        out.append((text, style))
+        used += len(text)
+    if used < width:
+        out.append((" " * (width - used), None))
+    return out
+
+
+def paint(line: Line, color: bool) -> str:
+    if not color:
+        return "".join(t for t, _ in line)
+    return "".join(f"\033[{COLORS[s]}m{t}\033[0m" if s and t.strip() else t for t, s in line)
+
+
+def _section(branch: str, snap: Snapshot, repos: list[str], width: int, height: int, now: datetime) -> list[Line]:
+    stages = STAGES.get(branch) or STAGES["develop"]
+    cols = [max(4, len(label)) + 1 for _, label, _ in stages]
+    rw = max([len("Repo")] + [len(_short(r)) for r in repos]) + 2
+    lines: list[Line] = []
+
+    keys = [(r, branch) for r in repos]
+    bad = [k for k in keys if snap.latest.get(k, {}).get("result") not in (None, "passed")]
+    title = f" {branch.upper()} "
+    summary = (f"{len(bad)} of {len(keys)} not passing" if bad else "all passing") if snap.latest else "no runs yet"
+    lines.append([(title, "head"), ("  " + summary, "red" if bad else "green")])
+
+    r = snap.running
+    if r and r.branch == branch:
+        lines.append([(f" ▶ RUNNING {_short(r.repo)} {r.run.rsplit('-', 1)[-1]} · {ago(r.started, now)} · ", "yellow"),
+                      (r.last_line, "dim")])
+    else:
+        lines.append([(" idle", "dim")])
+
+    head: Line = [(f" {'Repo':<{rw}}{'Result':<9}", "bold")]
+    head += [(f"{label:<{w}}", "bold") for (_, label, _), w in zip(stages, cols)]
+    head.append(("When", "bold"))
+    lines.append(head)
+    for repo, _ in keys:
+        row = snap.latest.get((repo, branch))
+        line: Line = [(f" {_short(repo):<{rw}}", None)]
+        running_here = r is not None and r.repo == repo and r.branch == branch
+        if not row:
+            line.append(("RUNNING  " if running_here else "-        ", "yellow" if running_here else "dim"))
+            line += [(f"{NOT_RUN[0]:<{w}}", NOT_RUN[1]) for w in cols]
+            line.append(("not run yet", "dim"))
+            lines.append(line)
+            continue
+        res = row["result"]
+        line.append((f"{res.upper():<8}", RESULT_COLOR.get(res)))
+        line.append((" ", None))
+        for (key, _, _), w in zip(stages, cols):
+            text, style = CELL.get(row.get("stages", {}).get(key, ""), NOT_RUN)
+            line += [(text, style), (" " * (w - len(text)), None)]
+        line.append((when(_parse_time(row.get("started")), now), None))
+        if running_here:
+            line.append((" ▶", "yellow"))
+        lines.append(line)
+
+    legend = " "
+    for i, (_, label, meaning) in enumerate(stages):
+        item = ("" if i == 0 else " · ") + f"{label}={meaning}"
+        if len(legend) + len(item) > width and legend.strip():
+            lines.append([(legend, "dim")])
+            legend, item = " ", item.removeprefix(" · ")
+        legend += item
+    lines.append([(legend, "dim")])
+    lines.append([])
+
+    blocked = [(repo, b) for repo, _ in keys for b in snap.latest.get((repo, branch), {}).get("blockers", [])]
+    if blocked:
+        lines.append([(" Blocked by", "bold")])
+        lines += [[(f" ✗ {_short(repo)}: ", "red"), (b, None)] for repo, b in blocked]
+        lines.append([])
+    if branch == "main":
+        if snap.release:
+            repo, rr = snap.release
+            lines.append([(f" Latest release: {rr['release']} ({_short(repo)}, "
+                           f"{ago(_parse_time(rr.get('started')), now)})", "cyan")])
+        else:
+            lines.append([(" Latest release: none yet", "dim")])
+        lines.append([])
+
+    lines.append([(f" {'When':<13}{'Repo':<{rw}}{'Mode':<6}{'Result':<9}{'Took':<7}{'Commit':<9}Subject", "bold")])
+    recent = [(repo, row) for repo, b, row in snap.recent if b == branch]
+    for repo, row in recent[: max(0, height - len(lines))]:
+        res = row["result"]
+        lines.append([(f" {when(_parse_time(row.get('started')), now):<13}{_short(repo):<{rw}}"
+                       f"{row.get('mode', ''):<6}", None),
+                      (f"{res.upper():<9}", RESULT_COLOR.get(res)),
+                      (f"{_dur(row.get('seconds')):<7}{row['sha'][:8]:<9}", None),
+                      (row.get("subject", ""), "dim")])
+    return [fit(l, width) for l in lines[:height]] + [fit([], width)] * max(0, height - len(lines))
 
 
 def render(snap: Snapshot, cols: int, rows: int, now: datetime, color: bool = False,
            host: str = "roberto-server", repos: list[str] | None = None,
            branches: tuple[str, ...] = ("develop", "main")) -> list[str]:
-    """One frame as a list of lines, each at most `cols` visible characters wide."""
-    paint = Painter(color)
-    cols = max(cols, 60)
-    out: list[tuple[str, str | None]] = []           # (plain text, style) lines
-
-    def line(text: str = "", style: str | None = None) -> None:
-        out.append((_cell(text, cols).rstrip(), style))
-
+    """One frame: header, one section per branch (side by side when wide enough), footer."""
+    cols, rows = max(cols, 60), max(rows, 12)
+    repos = repos or sorted({k[0] for k in snap.latest})
+    top: list[Line] = []
     title = f" GMshield CI/CD · {host}"
     clock = f"{now.astimezone():%Y-%m-%d %H:%M:%S %Z} "
-    line(title + " " * max(1, cols - len(title) - len(clock)) + clock, "bold")
-    line("─" * cols, "dim")
-
-    # poller / live status
+    top.append([(title + " " * max(1, cols - len(title) - len(clock)) + clock, "bold")])
     if snap.paused:
-        line(" Poller: PAUSED (rm ~/gmshield-ci/PAUSED to resume)", "yellow")
+        top.append([(" Poller PAUSED: no pushes are checked (rm ~/gmshield-ci/PAUSED to resume)", "alert")])
     elif snap.timer not in ("active", "unknown"):
-        line(f" Poller: timer {snap.timer.upper()}: nothing is being checked", "red")
-    if snap.running:
-        r = snap.running
-        line(f" ▶ RUNNING  {r.repo} {r.branch}  {r.run}  started {ago(r.started, now)}", "yellow")
-        if r.last_line:
-            line(f"   {r.last_line}", "dim")
-    elif snap.poll_active:
-        line(" ▶ Polling GitHub…", "yellow")
-    else:
-        line(" Idle: waiting for pushes to develop or main (checked every minute)", "dim")
-    line()
+        top.append([(f" Poller timer {snap.timer.upper()}: no pushes are checked", "alert")])
+    elif snap.poll_active and not snap.running:
+        top.append([(" Polling GitHub…", "yellow")])
+    top.append([("─" * cols, "dim")])
 
-    # latest result per repo and branch
-    keys = [(r, b) for r in (repos or sorted({k[0] for k in snap.latest})) for b in branches]
-    rw = max([len("Repository")] + [len(k[0]) for k in keys]) + 2
-    head = f" {'Repository':<{rw}}{'Branch':<9}{'Result':<10}{'Commit':<10}{'When':<14}"
-    line(head + "Commit subject / what blocked it", "bold")
-    for repo, branch in keys:
-        row = snap.latest.get((repo, branch))
-        if not row:
-            line(f" {repo:<{rw}}{branch:<9}{'-':<10}not run yet", "dim")
-            continue
-        result = row["result"]
-        started = _parse_time(row.get("started"))
-        prefix = f" {repo:<{rw}}{branch:<9}"
-        rest = f"{row['sha'][:8]:<10}{when(started, now):<14}"
-        warn = int(row.get("warnings") or 0)
-        detail = row.get("subject", "")
-        if row.get("blockers"):
-            detail = "; ".join(row["blockers"])
-        elif warn:
-            detail = f"{warn} warning{'s' if warn != 1 else ''} · {detail}"
-        avail = cols - len(prefix) - 10 - len(rest)
-        text = prefix + paint(f"{result.upper():<10}", RESULT_COLOR.get(result)) + rest
-        if avail > 3:
-            style = "red" if row.get("blockers") else ("yellow" if warn else None)
-            text += paint(_cell(detail, avail).rstrip(), style)
-        out.append((text, "__raw__"))
-
-    # newest release
-    line()
-    if snap.release:
-        repo, r = snap.release
-        line(f" Latest release: {r['release']}  ({repo}, {ago(_parse_time(r.get('started')), now)})", "cyan")
-    else:
-        line(" Latest release: none yet", "dim")
-    line()
-
-    # recent runs, as many as fit above the footer
-    line(f" {'When':<14}{'Repository':<{rw}}{'Branch':<9}{'Mode':<7}{'Result':<10}{'Took':<8}{'Commit':<10}Subject",
-         "bold")
-    room = max(0, rows - len(out) - 2)
-    for repo, branch, r in snap.recent[:room]:
-        started = _parse_time(r.get("started"))
-        prefix = f" {when(started, now):<14}{repo:<{rw}}{branch:<9}{r.get('mode', ''):<7}"
-        res = r["result"]
-        tail = f"{_dur(r.get('seconds')):<8}{r['sha'][:8]:<10}"
-        avail = cols - len(prefix) - 10 - len(tail)
-        subj = _cell(r.get("subject", ""), avail).rstrip() if avail > 3 else ""
-        out.append((prefix + paint(f"{res.upper():<10}", RESULT_COLOR.get(res)) + tail + subj, "__raw__"))
-
-    while len(out) < rows - 1:
-        out.append(("", None))
     footer = " Details and reports: gmshield-results on the workstation"
     updated = f"refreshed {now.astimezone():%H:%M:%S} "
-    out = out[: rows - 1]
-    out.append((footer + " " * max(1, cols - len(footer) - len(updated)) + updated, "dim"))
-    return [text if style == "__raw__" else paint(text, style) for text, style in out]
+    bottom = [[(footer + " " * max(1, cols - len(footer) - len(updated)) + updated, "dim")]]
+    body_h = rows - len(top) - len(bottom)
+
+    side_by_side = len(branches) == 2 and cols >= 150
+    body: list[Line] = []
+    if side_by_side:
+        w = (cols - 3) // 2
+        left = _section(branches[0], snap, repos, w, body_h, now)
+        right = _section(branches[1], snap, repos, cols - 3 - w, body_h, now)
+        body = [l + [(" │ ", "dim")] + r for l, r in zip(left, right)]
+    else:
+        each = max(1, (body_h - (len(branches) - 1)) // max(1, len(branches)))
+        for i, b in enumerate(branches):
+            if i:
+                body.append([("─" * cols, "dim")])
+            body += _section(b, snap, repos, cols, each, now)
+        body = body[:body_h] + [[]] * max(0, body_h - len(body))
+    frame = [paint(fit(l, cols), color) for l in top + body + bottom]
+    return frame if color else [l.rstrip() for l in frame]
 
 
 # ------------------------------------------------------------------ loop
@@ -313,7 +376,7 @@ def run(s: Settings, once: bool = False, interval: float = 5.0) -> int:
         size = shutil.get_terminal_size((120, 40))
         frame = render(collect(s), size.columns, size.lines, datetime.now(timezone.utc), sys.stdout.isatty(),
                        host, repos, s.branches)
-        print("\n".join(l.rstrip() for l in frame))
+        print("\n".join(frame))
         return 0
     w = sys.stdout.write
     # hide the cursor; on the Linux console also turn off screen blanking and powerdown
