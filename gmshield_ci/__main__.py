@@ -3,6 +3,7 @@
   python3 -m gmshield_ci poll                    # what the systemd timer runs every minute
   python3 -m gmshield_ci run backend develop     # re-run a branch by hand (e.g. after a hotspot review)
   python3 -m gmshield_ci status                  # last result per repo and branch
+  python3 -m gmshield_ci dashboard [--once]      # live status screen (runs on tty1, see deploy/)
   python3 -m gmshield_ci selftest                # is the server ready?
   python3 -m gmshield_ci sonar-setup             # one-time SonarQube setup (idempotent)
   python3 -m gmshield_ci sonar-delete KEY        # remove a SonarQube project (tests)
@@ -14,7 +15,7 @@ import json
 import sys
 import urllib.request
 
-from . import __version__, github, pipeline, sonar
+from . import __version__, dashboard, github, pipeline, sonar
 from .config import load_settings
 from .dockerops import capture
 
@@ -89,6 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("branch", choices=["develop", "main"])
     r.add_argument("--sha")
     sub.add_parser("status")
+    db = sub.add_parser("dashboard")
+    db.add_argument("--once", action="store_true", help="print one frame and exit")
+    db.add_argument("--interval", type=float, default=5.0, help="seconds between redraws")
     sub.add_parser("selftest")
     sub.add_parser("sonar-setup")
     d = sub.add_parser("sonar-delete")
@@ -100,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         return pipeline.manual_run(load_settings(), a.repo, a.branch, a.sha)
     if a.cmd == "status":
         return status()
+    if a.cmd == "dashboard":
+        return dashboard.run(load_settings(), once=a.once, interval=max(1.0, a.interval))
     if a.cmd == "sonar-setup":
         return sonar_setup()
     if a.cmd == "sonar-delete":
