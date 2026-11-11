@@ -121,11 +121,25 @@ ci-cd/main/release-main-<YYYYMMDDTHHMMSSZ>/         RELEASE.md, release.json, ar
 
 `docs/CI-CD-RESULTS.md` in the workspace lists the command for every test on both branches.
 
+### Dashboard on the server's screen
+
+roberto-server's own screen (tty1) shows a live, read-only status page: the latest full run of every
+repo and branch (PASSED, FAILED or BLOCKED, with the gate that stopped it), the run in progress and
+its last log line, the newest release and the most recent runs. It redraws every 5 seconds from
+`state/` and `artifacts/` only: it never takes the poll lock, calls GitHub or writes anything.
+Detailed reports still come through `gmshield-results`.
+
+- Install once: `sudo bash deploy/install-dashboard.sh` (service `gmshield-dashboard`; the login
+  prompt moves to tty2, Ctrl+Alt+F2). Times are shown in `America/Sao_Paulo`; set `DASH_TZ` to change.
+- Remove: `sudo bash deploy/install-dashboard.sh --remove`.
+- Same view over SSH: `python3 -m gmshield_ci dashboard --once`.
+
 ## Operations (on roberto-server, in `~/gmshield-ci/runner`)
 
 | Task | Command |
 |---|---|
 | Status of every repo and branch | `python3 -m gmshield_ci status` |
+| Dashboard, one frame | `python3 -m gmshield_ci dashboard --once` |
 | Is the server ready? | `python3 -m gmshield_ci selftest` |
 | Re-run a branch by hand | `python3 -m gmshield_ci run backend develop` |
 | Apply `gates.toml` changes to SonarQube | `python3 -m gmshield_ci sonar-setup` |
