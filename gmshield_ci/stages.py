@@ -29,6 +29,7 @@ class Record:
     files: list[str] = field(default_factory=list)
     detail: str = ""
     seconds: float = 0.0
+    warnings: list[str] = field(default_factory=list)   # shown in every report; never change the status
 
 
 def execute(run: "Run", key: str, title: str, gate: str | list[str] | None, fn, *args) -> list[Record]:
@@ -45,7 +46,8 @@ def execute(run: "Run", key: str, title: str, gate: str | list[str] | None, fn, 
         r = Record(key if not isinstance(gate, list) else f"{key}:{g}",
                    title if not isinstance(gate, list) else run.titles.get(g, title), g,
                    outcome=outcome, metrics=metrics, files=files,
-                   detail=metrics.get("details", {}).get(g, detail), seconds=seconds)
+                   detail=metrics.get("details", {}).get(g, detail), seconds=seconds,
+                   warnings=list(metrics.get("warnings") or []))
         if g:
             r.status, r.threshold, r.reasons = gates.judge(g, outcome, metrics, run.s.gates)
         else:
@@ -53,6 +55,8 @@ def execute(run: "Run", key: str, title: str, gate: str | list[str] | None, fn, 
             if outcome == "error":
                 r.reasons = [metrics.get("error", detail or "error")]
         run.log(f"stage end: {r.title}: {r.status} ({seconds}s) {'; '.join(r.reasons)}")
+        for w in r.warnings:
+            run.log(f"stage warning: {r.title}: {w}")
         recs.append(r)
     with run.lock:
         run.records.extend(recs)
@@ -112,8 +116,9 @@ def sast(run: "Run"):
     if rc not in (0, 1) or not out.exists():
         return _error(f"semgrep exit {rc}", ["semgrep.log"])
     m = gates.parse_semgrep(out)
+    warned = f"; WARNING: {m['unscanned_files']} file(s) not fully scanned" if m["warnings"] else ""
     return "ok", m, ["semgrep.json", "semgrep.sarif", "semgrep.log"], \
-        f"high {m['high']}, medium {m['medium']}, low {m['low']}"
+        f"high {m['high']}, medium {m['medium']}, low {m['low']}{warned}"
 
 
 def _trivy(run: "Run", name: str, args: list[str], extra_mounts=()) -> int:

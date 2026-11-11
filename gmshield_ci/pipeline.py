@@ -268,12 +268,16 @@ def execute_run(s: Settings, repo: Repo, branch: str, sha: str, mirror: Path, mo
         if run.contract.service:
             prune_images(f"gmshield-ci/{run.contract.service}", s.limit("keep_images_per_service", 3))
         sh(["docker", "image", "prune", "-f", "--filter", "dangling=true"], None, 300)
+    warned = len(report.warnings_of(run.records))
     if report_status:
         state = {"passed": "success", "blocked": "failure"}.get(run.result, "failure")
         blockers = [r.title for r in run.records if r.status == "failed"]
         desc = f"{run.result.upper()} on roberto-server" + (f": {', '.join(blockers)}" if blockers else "")
+        if warned and not blockers:
+            desc += f" ({warned} warning{'s' if warned != 1 else ''}, see the run summary)"
         github.status(s.org, repo.name, sha, state, context, desc[:140])
-    run.log(f"run {run.id} finished: {run.result.upper()} in {run.seconds}s")
+    run.log(f"run {run.id} finished: {run.result.upper()} in {run.seconds}s"
+            + (f", {warned} warning(s)" if warned else ""))
     return run
 
 

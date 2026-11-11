@@ -31,12 +31,59 @@ def _semgrep_level(sev: str) -> str:
     return "low"
 
 
-def parse_semgrep(path: Path) -> dict:
+def _semgrep_scan_error(e: dict, root: str) -> tuple[str | None, str, list[int]]:
+    """(file, kind, lines) of one entry in Semgrep's `errors` list.
+
+    `type` is a plain name ("Syntax error", "Timeout") or a pair such as
+    ["PartialParsing", [locations]]; `spans` or those locations say where.
+    """
+    kind = e.get("type")
+    spans = e.get("spans") or []
+    if isinstance(kind, list):
+        if not spans and len(kind) > 1 and isinstance(kind[1], list):
+            spans = kind[1]
+        kind = kind[0] if kind else None
+    spans = [sp for sp in spans if isinstance(sp, dict)]
+    file = e.get("path") or next((sp.get("file") or sp.get("path") for sp in spans), None)
+    if file and file.startswith(root):
+        file = file[len(root):]
+    lines = sorted({(sp.get("start") or {}).get("line") for sp in spans} - {None})
+    return file, str(kind or e.get("message") or "error"), lines
+
+
+def _semgrep_warnings(errors: list, root: str, limit: int = 15) -> tuple[int, list[str]]:
+    """One warning per file Semgrep did not fully scan: (number of files, warning texts)."""
+    per_file: dict[str | None, dict] = {}
+    for e in errors:
+        file, kind, lines = _semgrep_scan_error(e if isinstance(e, dict) else {"message": str(e)}, root)
+        entry = per_file.setdefault(file, {"kinds": [], "lines": set()})
+        if kind not in entry["kinds"]:
+            entry["kinds"].append(kind)
+        entry["lines"].update(lines)
+    out = []
+    for file, entry in per_file.items():
+        where = f", line{'s' if len(entry['lines']) > 1 else ''} {', '.join(map(str, sorted(entry['lines'])))}" \
+            if entry["lines"] else ""
+        out.append(f"not fully scanned: {file or 'file not named by Semgrep'} ({'; '.join(entry['kinds'])}{where})")
+    if len(out) > limit:
+        out = out[:limit] + [f"... and {len(out) - limit} more file(s), see semgrep.json"]
+    return len(per_file), out
+
+
+def parse_semgrep(path: Path, root: str = "/src/") -> dict:
+    """Counts by severity, plus a warning for every file Semgrep could not fully scan.
+
+    Semgrep exits successfully when it cannot parse part of a file (for example syntax newer than
+    its parser), so that code would otherwise pass the gate unread. The warnings do not block.
+    """
     data = _load(path)
     levels = Counter(_semgrep_level(r.get("extra", {}).get("severity", "")) for r in data.get("results", []))
     top = Counter(r.get("check_id", "?").rsplit(".", 1)[-1] for r in data.get("results", []))
+    errors = data.get("errors") or []
+    files, warnings = _semgrep_warnings(errors, root)
     return {"high": levels["high"], "medium": levels["medium"], "low": levels["low"],
-            "scan_errors": len(data.get("errors", [])), "top_rules": dict(top.most_common(10))}
+            "scan_errors": len(errors), "unscanned_files": files, "warnings": warnings,
+            "top_rules": dict(top.most_common(10))}
 
 
 def parse_trivy(path: Path) -> dict:

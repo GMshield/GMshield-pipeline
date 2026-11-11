@@ -3,4 +3,16 @@
   {"check_id": "a.b.weak-hash", "extra": {"severity": "WARNING"}},
   {"check_id": "a.b.style", "extra": {"severity": "INFO"}},
   {"check_id": "a.b.new-style-high", "extra": {"severity": "HIGH"}}],
- "errors": [{"message": "parse error"}]}
+ "errors": [
+  {"message": "parse error"},
+  {"code": 3, "level": "warn",
+   "type": ["PartialParsing", [
+     {"path": "/src/app/Modern.java", "start": {"line": 1, "col": 15, "offset": 0}, "end": {"line": 1, "col": 19, "offset": 4}},
+     {"path": "/src/app/Modern.java", "start": {"line": 16, "col": 9, "offset": 0}, "end": {"line": 16, "col": 14, "offset": 5}}]],
+   "message": "Syntax error at line /src/app/Modern.java:1:\n `java` was unexpected",
+   "path": "/src/app/Modern.java",
+   "spans": [
+     {"file": "/src/app/Modern.java", "start": {"line": 1, "col": 15, "offset": 0}, "end": {"line": 1, "col": 19, "offset": 4}},
+     {"file": "/src/app/Modern.java", "start": {"line": 16, "col": 9, "offset": 0}, "end": {"line": 16, "col": 14, "offset": 5}}]},
+  {"code": 2, "level": "warn", "type": "Timeout",
+   "message": "Timeout when running a rule on /src/app/Big.java", "path": "/src/app/Big.java"}]}

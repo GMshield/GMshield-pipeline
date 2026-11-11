@@ -105,6 +105,11 @@ def _reports(st: dict) -> list[str]:
     return [f for f in st.get("files", []) if not f.startswith("..")]
 
 
+def _warnings(s: dict) -> list[tuple[str, str]]:
+    """(test title, warning) pairs of a run, without repeats. Warnings never change the result."""
+    return list(dict.fromkeys((st["title"], w) for st in s.get("stages", []) for w in st.get("warnings", [])))
+
+
 def release_md(s: dict) -> str:
     repo, branch, sha, c = s["repo"], s["branch"], s["sha"], s.get("commit", {})
     gh = repo.startswith("GMshield-")
@@ -114,8 +119,10 @@ def release_md(s: dict) -> str:
     if branch == "main" and s["result"] == "passed" and not deployed:
         verdict = "released (nothing to deploy: no Dockerfile yet)"
     commit = f"[`{sha[:8]}`](https://github.com/{ORG}/{repo}/commit/{sha})" if gh else f"`{sha[:8]}`"
+    warnings = _warnings(s)
+    warned = f" {len(warnings)} warning{'s' if len(warnings) != 1 else ''}, listed below." if warnings else ""
     lines = [f"# {repo} · {branch} · {started:%Y-%m-%d %H:%M:%S} UTC", "",
-             f"**Result: {s['result'].upper()}**, {verdict}.", "",
+             f"**Result: {s['result'].upper()}**, {verdict}.{warned}", "",
              "| | |", "|---|---|",
              f"| Repository | {f'[{repo}](https://github.com/{ORG}/{repo})' if gh else repo} |",
              f"| Branch | {branch} |",
@@ -138,6 +145,9 @@ def release_md(s: dict) -> str:
         lines += ["", "## Outcome", ""]
         lines += [f"- **{t}:** {r}" for t, r in reasons]
         lines += [f"- {n}" for n in s.get("notes", [])]
+    if warnings:
+        lines += ["", "## Warnings", "", "Warnings do not change the result.", ""]
+        lines += [f"- **{t}:** {w}" for t, w in warnings]
     lines += ["", "## Artifacts", "",
               "Every report and log of this run is in [artifacts/](artifacts/); the pipeline's own summary is "
               "[artifacts/summary.md](artifacts/summary.md) and its full log [artifacts/pipeline.log](artifacts/pipeline.log).", ""]
@@ -167,9 +177,10 @@ def latest(rows: list[dict]) -> list[dict]:
 
 
 def show_table(rows: list[dict]) -> None:
-    print(f"{'Repo':<20} {'Branch':<8} {'Result':<8} {'Commit':<9} Release folder (docs/)")
+    print(f"{'Repo':<20} {'Branch':<8} {'Result':<8} {'Warn':<5} {'Commit':<9} Release folder (docs/)")
     for s in rows:
-        print(f"{s['repo']:<20} {s['branch']:<8} {s['result'].upper():<8} {s['sha'][:8]:<9} {s['folder']}")
+        print(f"{s['repo']:<20} {s['branch']:<8} {s['result'].upper():<8} {str(len(_warnings(s)) or '-'):<5} "
+              f"{s['sha'][:8]:<9} {s['folder']}")
 
 
 def show_detail(s: dict, test: str | None) -> None:
@@ -188,6 +199,8 @@ def show_detail(s: dict, test: str | None) -> None:
             print(f"        threshold: {st.get('threshold', '-')}")
         for r in st.get("reasons", []) if st["status"] == "failed" else []:
             print(f"        -> {r}")
+        for w in st.get("warnings", []):
+            print(f"        warning: {w}")
         if test:
             for f in _reports(st):
                 print(f"        report: {DOCS / s['folder'] / 'artifacts' / f}")
