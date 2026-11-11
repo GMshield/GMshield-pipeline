@@ -43,6 +43,12 @@ the commit (fail closed). Reviewed false positives are suppressed in the app rep
 (`.gitleaksignore`, `nosemgrep`, `.trivyignore`, `.gmshield/zap-ignore.txt`, or "Safe" in SonarQube),
 never by loosening the gates.
 
+**Warnings.** Semgrep exits successfully when it cannot fully scan a file, for example when the code
+uses syntax newer than its parser (in Java 25: `import module` and statements before `super()`).
+Findings in that code may be missing, so the run reports a warning for each such file, with the lines
+when Semgrep gives them. A warning never changes the result: it appears in the SAST result,
+`summary.md`, `RELEASE.md`, the GitHub status and `gmshield-results` (column `Warn`).
+
 ### SonarQube and the human decision
 
 The SonarQube gate **GMshield** (defined in `gates.toml`, applied by `sonar-setup`) requires, on new

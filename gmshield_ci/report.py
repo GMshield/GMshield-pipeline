@@ -22,21 +22,32 @@ def _links(files: list[str]) -> str:
     return ", ".join(f"[{Path(f).name or f}]({f})" for f in files) or "-"
 
 
+def warnings_of(records) -> list[tuple[str, str]]:
+    """(stage title, warning) pairs of a run, without repeats. Warnings never change a status."""
+    return list(dict.fromkeys((r.title, w) for r in records for w in r.warnings))
+
+
+def _warned(result: str, count: int) -> str:
+    return f"{result}, {count} warning{'s' if count != 1 else ''}" if count else result
+
+
 def write_run(run: "Run") -> None:
     data = {
         "repo": run.repo.name, "branch": run.branch, "run": run.id, "mode": run.mode, "result": run.result,
         "sha": run.sha, "tree": run.tree, "commit": run.commit, "started": run.started.isoformat(),
         "seconds": getattr(run, "seconds", 0), "host": socket.gethostname(),
         "release": run.release_tag, "notes": run.notes, "rolled_back": run.rolled_back,
+        "warnings": len(warnings_of(run.records)),
         "stages": [{k: getattr(r, k) for k in ("key", "title", "gate", "outcome", "status", "threshold",
-                                                "reasons", "metrics", "files", "detail", "seconds")}
+                                                "reasons", "warnings", "metrics", "files", "detail", "seconds")}
                    for r in run.records],
     }
     (run.dir / "summary.json").write_text(json.dumps(data, indent=2, default=str))
     (run.dir / "summary.md").write_text(_markdown(run, data))
     branch_dir = run.dir.parent
     with open(branch_dir / "history.jsonl", "a") as fh:
-        fh.write(json.dumps({k: data[k] for k in ("run", "mode", "result", "sha", "started", "seconds", "release")}
+        fh.write(json.dumps({k: data[k] for k in ("run", "mode", "result", "sha", "started", "seconds", "release",
+                                                  "warnings")}
                             | {"subject": run.commit.get("subject", "")}) + "\n")
     latest = branch_dir / "latest"
     tmp = branch_dir / ".latest.tmp"
@@ -49,6 +60,8 @@ def write_run(run: "Run") -> None:
 def _markdown(run: "Run", d: dict) -> str:
     c = run.commit
     verdict = {"passed": "PASSED", "failed": "FAILED", "blocked": "BLOCKED"}.get(run.result, run.result.upper())
+    warnings = warnings_of(run.records)
+    verdict = _warned(verdict, len(warnings))
     lines = [f"# {run.repo.name} · {run.branch} · `{run.short}` · {verdict}", "",
              "| | |", "|---|---|",
              f"| Commit | `{run.sha}` {c.get('subject', '')} ({c.get('author', '')}, {c.get('date', '')}) |",
@@ -65,6 +78,9 @@ def _markdown(run: "Run", d: dict) -> str:
         lines += ["", "## Outcome", ""]
         lines += [f"- **{t}:** {x}" for t, x in blockers]
         lines += [f"- {n}" for n in run.notes]
+    if warnings:
+        lines += ["", "## Warnings", "", "Warnings do not change the result.", ""]
+        lines += [f"- **{t}:** {w}" for t, w in warnings]
     tops = [(r.title, r.metrics.get("top") or r.metrics.get("alerts") or r.metrics.get("where"))
             for r in run.records if r.status != "skipped"]
     tops = [(t, v) for t, v in tops if v]
@@ -103,12 +119,14 @@ def write_index(root: Path) -> None:
            "report and SBOM, and `pipeline.log`.", "", "## Latest per branch", "",
            "| Repo | Branch | Result | Commit | When | Run |", "|---|---|---|---|---|---|"]
     for repo, branch, r in latest:
-        out.append(f"| {repo} | {branch} | {r['result'].upper()} | `{r['sha'][:8]}` {r.get('subject', '')[:60]} | "
+        result = _warned(r["result"].upper(), int(r.get("warnings") or 0))
+        out.append(f"| {repo} | {branch} | {result} | `{r['sha'][:8]}` {r.get('subject', '')[:60]} | "
                    f"{r['started'][:16].replace('T', ' ')} | [{r['run']}]({repo}/{branch}/{r['run']}/summary.md) |")
     out += ["", "## Recent runs", "", "| When | Repo | Branch | Mode | Result | Commit | Release |",
             "|---|---|---|---|---|---|---|"]
     for repo, branch, r in recent[:40]:
+        result = _warned(r["result"].upper(), int(r.get("warnings") or 0))
         out.append(f"| {r['started'][:16].replace('T', ' ')} | {repo} | {branch} | {r.get('mode')} | "
-                   f"[{r['result'].upper()}]({repo}/{branch}/{r['run']}/summary.md) | `{r['sha'][:8]}` | "
+                   f"[{result}]({repo}/{branch}/{r['run']}/summary.md) | `{r['sha'][:8]}` | "
                    f"{r.get('release') or ''} |")
     (root / "README.md").write_text("\n".join(out) + "\n")

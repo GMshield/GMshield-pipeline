@@ -1,10 +1,14 @@
 """Unit tests for report parsing, quality gates and the repo contract. Run: python3 -m unittest -v"""
+import importlib.util
+import json
 import tempfile
+import threading
 import tomllib
+import types
 import unittest
 from pathlib import Path
 
-from gmshield_ci import gates
+from gmshield_ci import gates, report, stages
 from gmshield_ci.config import RUNNER_DIR, load_contract
 
 FIX = Path(__file__).parent / "fixtures"
@@ -19,7 +23,34 @@ class ParserTest(unittest.TestCase):
 
     def test_semgrep_maps_old_and_new_severities(self):
         m = gates.parse_semgrep(FIX / "reports" / "semgrep.json")
-        self.assertEqual((m["high"], m["medium"], m["low"], m["scan_errors"]), (2, 1, 1, 1))
+        self.assertEqual((m["high"], m["medium"], m["low"], m["scan_errors"]), (2, 1, 1, 3))
+
+    def test_semgrep_names_each_file_it_did_not_fully_scan(self):
+        m = gates.parse_semgrep(FIX / "reports" / "semgrep.json")
+        self.assertEqual(m["unscanned_files"], 3)
+        self.assertEqual(m["warnings"], [
+            "not fully scanned: file not named by Semgrep (parse error)",
+            "not fully scanned: app/Modern.java (PartialParsing, lines 1, 16)",   # /src/ prefix removed
+            "not fully scanned: app/Big.java (Timeout)"])
+
+    def test_semgrep_clean_scan_has_no_warnings(self):
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "semgrep.json"
+            report.write_text('{"results": [], "errors": []}')
+            m = gates.parse_semgrep(report)
+        self.assertEqual((m["scan_errors"], m["unscanned_files"], m["warnings"]), (0, 0, []))
+
+    def test_semgrep_warning_list_is_capped(self):
+        errors = [{"type": "Syntax error", "path": f"/src/f{i}.java", "spans": [{"start": {"line": 3}}]}
+                  for i in range(40)]
+        with tempfile.TemporaryDirectory() as d:
+            report = Path(d) / "semgrep.json"
+            report.write_text(json.dumps({"results": [], "errors": errors}))
+            m = gates.parse_semgrep(report)
+        self.assertEqual(m["unscanned_files"], 40)
+        self.assertEqual(len(m["warnings"]), 16)
+        self.assertEqual(m["warnings"][0], "not fully scanned: f0.java (Syntax error, line 3)")
+        self.assertEqual(m["warnings"][-1], "... and 25 more file(s), see semgrep.json")
 
     def test_trivy_counts_fixable_and_failed_misconfig(self):
         m = gates.parse_trivy(FIX / "reports" / "trivy.json")
@@ -46,6 +77,12 @@ class GateTest(unittest.TestCase):
     def test_sast_high_blocks_medium_tolerated(self):
         self.assertEqual(self.judge("sast", {"high": 1, "medium": 0})[0], "failed")
         self.assertEqual(self.judge("sast", {"high": 0, "medium": 3})[0], "passed")
+
+    def test_sast_scan_warnings_do_not_block(self):
+        metrics = {"high": 0, "medium": 0, "low": 0, "unscanned_files": 1,
+                   "warnings": ["not fully scanned: app/Modern.java (PartialParsing, lines 1, 16)"]}
+        status, _, reasons = self.judge("sast", metrics)
+        self.assertEqual((status, reasons), ("passed", []))
 
     def test_only_fixable_vulns_block(self):
         m = gates.parse_trivy(FIX / "reports" / "trivy.json")
@@ -95,6 +132,58 @@ class GateTest(unittest.TestCase):
         metrics = [c[0] for c in GATES["sonar"]["conditions"]]
         self.assertIn("new_security_hotspots_reviewed", metrics)
         self.assertIn("new_software_quality_security_rating", metrics)
+
+
+class WarningTest(unittest.TestCase):
+    """A warning is shown in every report and never changes a stage's status."""
+    WARNING = "not fully scanned: app/Modern.java (PartialParsing, lines 1, 16)"
+
+    def fake_run(self):
+        run = types.SimpleNamespace(records=[], lock=threading.Lock(), titles={}, logged=[],
+                                    s=types.SimpleNamespace(gates=GATES))
+        run.log = run.logged.append
+        return run
+
+    def sast_stage(self, run):
+        return "ok", {"high": 0, "medium": 0, "low": 0, "warnings": [self.WARNING]}, [], "high 0, medium 0, low 0"
+
+    def test_stage_keeps_its_status_and_carries_the_warning(self):
+        run = self.fake_run()
+        [rec] = stages.execute(run, "sast", "SAST (Semgrep)", "sast", self.sast_stage)
+        self.assertEqual((rec.status, rec.reasons, rec.warnings), ("passed", [], [self.WARNING]))
+        self.assertIn(f"stage warning: SAST (Semgrep): {self.WARNING}", run.logged)
+
+    def test_stage_without_warnings_has_an_empty_list(self):
+        run = self.fake_run()
+        [rec] = stages.execute(run, "secrets", "Secret scan (Gitleaks)", "secrets",
+                               lambda run: ("ok", {"findings": 0}, [], "0 finding(s)"))
+        self.assertEqual(rec.warnings, [])
+
+    def test_run_summary_lists_warnings(self):
+        run = self.fake_run()
+        stages.execute(run, "sast", "SAST (Semgrep)", "sast", self.sast_stage)
+        run.repo = types.SimpleNamespace(name="GMshield-sample")
+        run.branch, run.short, run.sha, run.id, run.mode = "develop", "abcdef12", "abcdef12" * 5, "run-1", "full"
+        run.result, run.commit, run.release_tag, run.notes = "passed", {}, None, []
+        text = report._markdown(run, {"seconds": 5, "host": "test"})
+        self.assertIn("· PASSED, 1 warning", text.splitlines()[0])
+        self.assertIn("## Warnings", text)
+        self.assertIn(f"- **SAST (Semgrep):** {self.WARNING}", text)
+
+    def test_workstation_release_page_lists_warnings(self):
+        spec = importlib.util.spec_from_file_location("gmshield_results",
+                                                      RUNNER_DIR / "workstation" / "gmshield-results.py")
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        stage = {"key": "sast", "title": "SAST (Semgrep)", "status": "passed", "detail": "high 0", "threshold": "-",
+                 "files": [], "reasons": []}
+        run = {"repo": "GMshield-sample", "branch": "develop", "sha": "abcdef12" * 5, "run": "run-1",
+               "result": "passed", "started": "2026-11-10T12:00:00+00:00", "commit": {}, "stages": [stage]}
+        self.assertNotIn("## Warnings", tool.release_md(run))            # runs from before warnings existed
+        stage["warnings"] = [self.WARNING]
+        text = tool.release_md(run)
+        self.assertIn("1 warning, listed below.", text)
+        self.assertIn(f"- **SAST (Semgrep):** {self.WARNING}", text)
 
 
 class ContractTest(unittest.TestCase):
