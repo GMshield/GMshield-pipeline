@@ -6,11 +6,12 @@
 
 [service]
 name = "backend"            # default: repo name without "GMshield-"
-port = 0                    # HTTP port inside the container; 0 = no HTTP (skips DAST)
-health_path = "/"           # must answer 2xx/3xx when the app is ready
+port = 0                    # HTTP port inside the container (0-65535); 0 = no HTTP (skips DAST)
+health_path = "/"           # must answer 2xx/3xx when the app is ready; letters, digits and ._~%:@+,;=/-
+                            # only (an optional ?query may add &)
 health_scheme = "http"      # "https": probes run curl --cacert /certs/ca.crt (needs [deploy].certs = true);
-                            # production: <home>/certs/ca.crt must exist and the app's certificate must
-                            # name gmshield-<service>; staging: a throwaway CA per run (see [deploy].certs)
+                            # production: ~/gmshield-ci/certs/<service>/ca.crt must exist and the app's
+                            # certificate must name gmshield-<service>; staging: a throwaway CA per run
 
 [build]
 dockerfile = "Dockerfile"
@@ -22,18 +23,19 @@ test_target = "test"        # Dockerfile stage that runs the unit tests
 # e.g. sonar.coverage.jacoco.xmlReportPaths=.gmshield-reports/jacoco.xml)
 
 [dast]
-path = "/"                  # where ZAP starts crawling
+path = "/"                  # where ZAP starts crawling (same characters as health_path)
 openapi = ""                # e.g. "/v3/api-docs": ZAP API scan instead of crawling (develop)
 
 [deploy]
-host_port = 0               # publish on 127.0.0.1:<host_port> in production; 0 = not published
-env = {}                    # non-secret settings, e.g. { SPRING_PROFILES_ACTIVE = "prod" }
+host_port = 0               # publish on 127.0.0.1:<host_port> in production (0-65535); 0 = not published
+env = {}                    # non-secret settings, e.g. { SPRING_PROFILES_ACTIVE = "prod" }; keys are
+                            # variable names ([A-Za-z_][A-Za-z0-9_]*)
                             # secrets: ~/gmshield-ci/secrets/<service>.env on roberto-server
                             # GMSHIELD_MODE is refused here: the pipeline alone sets it
 # Resources and placement. Production and staging get the same limits and hardening; staging
 # always runs in the CI slice (ci.slice), whatever `slice` says.
-memory = ""                 # e.g. "768m" or "2g" (docker --memory); "" = no limit
-cpus = ""                   # e.g. 1.5 (docker --cpus); "" = no limit
+memory = ""                 # e.g. "768m" or "2g" (docker --memory), at least "6m"; "" = no limit
+cpus = ""                   # e.g. 1.5 (docker --cpus), from 0.01 to 64; "" = no limit
 slice = ""                  # production cgroup slice: "containers.slice" or "ai.slice"; "" = Docker's default
 networks = []               # production networks, e.g. ["gmshield-app", "gmshield-data"]; [] = the
                             # pipeline's prod network. Created on the first, then connected to the others;
@@ -45,12 +47,17 @@ user = ""                   # e.g. "10001:10001"; "" = the image's USER
 cap_drop = []               # e.g. ["ALL"]
 tmpfs = []                  # e.g. ["/tmp", "/run/app:size=16m"]
 mounts = []                 # e.g. [{ name = "uploads", target = "/data/uploads", read_only = false }]
-                            # The source is a name, never a host path: production uses
-                            # ~/gmshield-ci/mounts/<service>/<name> (created mode 0700), staging a fresh
-                            # folder per run. --privileged, --cap-add and host paths cannot be asked for.
-certs = false               # true: ~/gmshield-ci/certs is mounted read-only at /run/gmshield/certs in
-                            # production; staging mounts a throwaway ca.crt, tls.crt and tls.key there
-                            # instead (leaf for "app" and "<service>"), made with openssl for that run only
+                            # The source is a name, never a host path: production uses the Docker named
+                            # volume gmshield-<service>-<name>, staging a throwaway volume of the run.
+                            # Docker fills a new volume from the image's folder at target, owner included:
+                            # create that folder in the image, owned by the app's user. Targets (mounts,
+                            # tmpfs, certificates) must differ and never be "/".
+                            # --privileged, --cap-add and host paths cannot be asked for.
+certs = false               # true: the service's own ~/gmshield-ci/certs/<service>/ (tls.crt, tls.key,
+                            # ca.crt) is mounted read-only at /run/gmshield/certs in production (missing:
+                            # the deploy fails, production untouched); staging mounts a throwaway ca.crt,
+                            # tls.crt and tls.key there instead (leaf for "app" and "<service>"), made
+                            # with openssl for that run only
 
 [staging]
 # The develop pipeline's throwaway copy of the app (active DAST), started with GMSHIELD_MODE=test on
@@ -60,7 +67,8 @@ services = []               # throwaway services, ready before the app starts: "
                             # Fixed test-mode credentials (match GMshield-backend's application-test-mode.yaml):
                             #   postgres:5432, database and user "gmshield", password "gmshield-test-mode"
                             #   redis:6379, no password
-# Companions: other stages of this Dockerfile, built and run beside the app under an alias.
+# Companions: other stages of this Dockerfile (they must exist), built and run beside the app under
+# an alias, as stand-ins: GMSHIELD_MODE=test, without the limits and hardening of [deploy].
 # [[staging.companions]]
 # target = "stand-in-backend"
 # alias = "stand-in-backend"
@@ -69,5 +77,5 @@ services = []               # throwaway services, ready before the app starts: "
 # Integration tests (develop, full run, after the image): this Dockerfile stage is built and run as a
 # container with GMSHIELD_MODE=test on an internal network beside the services; exit 0 passes.
 # Time limit: limits.integration_tests in tools.toml (1800 s). Without a target the stage is skipped.
-target = ""                 # e.g. "integration"
+target = ""                 # e.g. "integration" (must be a stage of the Dockerfile)
 services = []               # as [staging].services

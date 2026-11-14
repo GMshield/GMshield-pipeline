@@ -244,6 +244,7 @@ def jdk_home(run: "Run", log: Path) -> Path | None:
     if rc != 0 or not (tmp / "release").is_file():
         shutil.rmtree(tmp, ignore_errors=True)
         return None
+    shutil.rmtree(dest, ignore_errors=True)      # an incomplete copy from an interrupted earlier run
     tmp.rename(dest)
     return dest
 
@@ -270,7 +271,8 @@ def analyze(run: "Run"):
         else:
             warnings.append("the pinned JDK (tools.toml images.jdk27) could not be prepared; "
                             "Java types are resolved against the scanner's own runtime")
-    if (run.src / ".gmshield-reports" / "libraries").is_dir():   # the project's dependency jars
+    libraries = run.src / ".gmshield-reports" / "libraries"      # the project's dependency jars
+    if libraries.is_dir() and any(libraries.glob("*.jar")):
         jars = ".gmshield-reports/libraries/*.jar"
         # Test code also uses the main classes: without them SonarQube reports them as unresolved.
         main = ".gmshield-reports/classes," if (run.src / ".gmshield-reports" / "classes").is_dir() else ""
@@ -285,12 +287,13 @@ def analyze(run: "Run"):
                              "HOME": stages.CONTAINER_HOME},
                         secret_env={"SONAR_TOKEN": tok})
     task_file = run.src / ".scannerwork" / "report-task.txt"
-    if rc != 0 or not task_file.is_file():
-        return "error", {"error": f"sonar-scanner exit {rc}"}, ["sonarqube.log"], f"scanner failed (exit {rc})"
-    task = dict(l.split("=", 1) for l in task_file.read_text().splitlines() if "=" in l)
-    if UNRESOLVED in log.read_text(errors="replace"):
+    if log.is_file() and UNRESOLVED in log.read_text(errors="replace"):
         warnings.append(f"SonarQube reported \"{UNRESOLVED}\": some Java types were not resolved, "
                         "so findings that depend on them may be missing (see sonarqube.log)")
+    if rc != 0 or not task_file.is_file():
+        return "error", {"error": f"sonar-scanner exit {rc}", "warnings": warnings}, ["sonarqube.log"], \
+            f"scanner failed (exit {rc})"
+    task = dict(l.split("=", 1) for l in task_file.read_text().splitlines() if "=" in l)
     deadline = time.monotonic() + run.s.limit("sonar_processing", 600)
     while True:
         _, d = api("GET", "/api/ce/task", {"id": task.get("ceTaskId", "")}, auth=tok)
@@ -298,10 +301,12 @@ def analyze(run: "Run"):
         if state in ("SUCCESS", "FAILED", "CANCELED"):
             break
         if time.monotonic() > deadline:
-            return "error", {"error": "SonarQube did not finish processing in time"}, ["sonarqube.log"], "timeout"
+            return "error", {"error": "SonarQube did not finish processing in time", "warnings": warnings}, \
+                ["sonarqube.log"], "timeout"
         time.sleep(3)
     if state != "SUCCESS":
-        return "error", {"error": f"SonarQube processing {state}"}, ["sonarqube.log"], f"processing {state}"
+        return "error", {"error": f"SonarQube processing {state}", "warnings": warnings}, ["sonarqube.log"], \
+            f"processing {state}"
     _, qg = api("GET", "/api/qualitygates/project_status", {"analysisId": d["task"].get("analysisId", "")}, auth=tok)
     ps = qg.get("projectStatus", {})
     _, ms = api("GET", "/api/measures/component", {"component": key, "metricKeys": MEASURES}, auth=tok)

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+import posixpath
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -50,9 +52,7 @@ class Settings:
     @property
     def secrets_dir(self) -> Path: return self.home / "secrets"
     @property
-    def mounts_root(self) -> Path: return self.home / "mounts"      # <mounts_root>/<service>/<name>
-    @property
-    def certs_dir(self) -> Path: return self.home / "certs"         # mounted read-only when certs = true
+    def certs_dir(self) -> Path: return self.home / "certs"         # <certs_dir>/<service>/ when certs = true
 
     @property
     def instance(self) -> str:
@@ -98,17 +98,23 @@ CERTS_TARGET = "/run/gmshield/certs"           # where the certificates folder a
 RESERVED_ALIASES = ("app", "probe", "zap", *SERVICES)
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")          # mount names, networks, users, stages
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# URL paths: no quote, space or shell character, since a path reaches the probe's `sh -c` command.
+_URL_PATH = re.compile(r"/[A-Za-z0-9._~%:@+,;=/-]*(\?[A-Za-z0-9._~%:@+,;=/&?-]*)?")
+_CPUS = re.compile(r"[0-9]+(\.[0-9]+)?")
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9-]*")
 _PATH = re.compile(r"/[A-Za-z0-9_./-]*")                   # absolute container paths, no ':' or ','
 _TMPFS = re.compile(r"/[A-Za-z0-9_./-]*(:[A-Za-z0-9_=,.-]+)?")
-_MEMORY = re.compile(r"[1-9][0-9]*[bkmg]?")
+_MEMORY = re.compile(r"([1-9][0-9]*)([bkmg]?)")
+MIN_MEMORY = 6 * 1024 * 1024                               # Docker refuses less than 6 MiB
+MIN_CPUS = 0.01
 _USER = re.compile(r"[A-Za-z0-9_.-]+(:[A-Za-z0-9_.-]+)?")
 _CAP = re.compile(r"[A-Z][A-Z_]*")
 
 
 @dataclass(frozen=True)
 class Mount:
-    name: str          # source: <home>/mounts/<service>/<name> (production), a per-run folder (staging)
+    name: str          # source: Docker volume gmshield-<service>-<name> (production), a run-labelled one (staging)
     target: str        # absolute path inside the container
     read_only: bool = False
 
@@ -140,9 +146,9 @@ class Contract:
     cpus: str = ""                # e.g. "1.5"; "" = no limit
     slice: str = ""               # production cgroup slice; "" = Docker's default
     networks: list[str] = field(default_factory=list)   # production networks; [] = the pipeline's prod network
-    mounts: list[Mount] = field(default_factory=list)
+    mounts: list[Mount] = field(default_factory=list)    # Docker named volumes, never host paths
     tmpfs: list[str] = field(default_factory=list)
-    certs: bool = False
+    certs: bool = False           # <home>/certs/<service>/ read-only at CERTS_TARGET
     read_only: bool = False
     user: str = ""
     cap_drop: list[str] = field(default_factory=list)
@@ -215,9 +221,57 @@ def _env(t: dict, sect: str) -> dict:
     v = t.get("env", {})
     if not isinstance(v, dict):
         raise ContractError(f"[{sect}].env must be a table")
-    if MODE_VAR in v:
-        raise ContractError(f"[{sect}].env.{MODE_VAR}: set by the pipeline only, never in a contract")
-    return {str(k): str(x) for k, x in v.items()}
+    for k, x in v.items():
+        if not _ENV_KEY.fullmatch(k):
+            raise ContractError(f"[{sect}].env: {k!r} is not a variable name ([A-Za-z_][A-Za-z0-9_]*)")
+        if k == MODE_VAR:
+            raise ContractError(f"[{sect}].env.{MODE_VAR}: set by the pipeline only, never in a contract")
+        if isinstance(x, (dict, list)):
+            raise ContractError(f"[{sect}].env.{k} must be a plain value")
+    return {k: str(x) for k, x in v.items()}
+
+
+def _port(t: dict, sect: str, key: str) -> int:
+    v = t.get(key, 0)
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 65535:
+        raise ContractError(f"[{sect}].{key} = {v!r}: an integer from 0 to 65535")
+    return v
+
+
+def _url_path(t: dict, sect: str, key: str) -> str:
+    v = t.get(key, "/")
+    if not isinstance(v, str) or not _URL_PATH.fullmatch(v):
+        raise ContractError(f"[{sect}].{key} = {v!r}: a URL path such as \"/health\" "
+                            "(letters, digits and ._~%:@+,;=/- only)")
+    return v
+
+
+def _target(v: str) -> str:
+    """A container path as Docker sees it: repeated slashes and '.' segments do not count."""
+    return posixpath.normpath(re.sub(r"/+", "/", v))
+
+
+def _memory(t: dict) -> str:
+    v = _str(t, "deploy", "memory", "", None)
+    if v:
+        m = _MEMORY.fullmatch(v)
+        unit = {"": 1, "b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+        if not m or int(m.group(1)) * unit[m.group(2)] < MIN_MEMORY:
+            raise ContractError(f"[deploy].memory = {v!r}: a size such as \"512m\", at least 6m")
+    return v
+
+
+def _cpus(t: dict) -> str:
+    v = t.get("cpus", "")
+    if v == "":
+        return ""
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)) or \
+            (isinstance(v, str) and not _CPUS.fullmatch(v)):
+        raise ContractError(f"[deploy].cpus = {v!r}: a number such as 1.5")
+    f = float(v)
+    if not math.isfinite(f) or not MIN_CPUS <= f <= 64:
+        raise ContractError(f"[deploy].cpus = {v!r}: from {MIN_CPUS} to 64")
+    return format(round(f, 2), "g")
 
 
 def _services(t: dict, sect: str) -> list[str]:
@@ -234,33 +288,28 @@ def _parse(c: Contract, data: dict) -> None:
     svc, build = _table(data, "service"), _table(data, "build")
     dast, deploy = _table(data, "dast"), _table(data, "deploy")
     staging, test = _table(data, "staging"), _table(data, "test")
-    c.service = re.sub(r"[^a-z0-9-]", "-", str(svc.get("name", c.service)).lower())
-    c.port = int(svc.get("port", 0))
-    c.health_path = str(svc.get("health_path", "/"))
+    name = svc.get("name", c.service)
+    if not isinstance(name, str):
+        raise ContractError("[service].name must be a string")
+    c.service = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    if not c.service.strip("-"):
+        raise ContractError(f"[service].name = {name!r}: needs at least one letter or digit")
+    c.port = _port(svc, "service", "port")
+    c.health_path = _url_path(svc, "service", "health_path")
     c.health_scheme = _str(svc, "service", "health_scheme", "http")
     if c.health_scheme not in ("http", "https"):
         raise ContractError(f"[service].health_scheme = {c.health_scheme!r}: use \"http\" or \"https\"")
     c.dockerfile = str(build.get("dockerfile", "Dockerfile"))
     c.context = str(build.get("context", "."))
     c.test_target = str(build.get("test_target", "test"))
-    c.dast_path = str(dast.get("path", "/"))
+    c.dast_path = _url_path(dast, "dast", "path")
     c.openapi = str(dast.get("openapi", ""))
-    c.host_port = int(deploy.get("host_port", 0))
+    c.host_port = _port(deploy, "deploy", "host_port")
     c.env = _env(deploy, "deploy")
     c.self_update = bool(deploy.get("self_update", False))
 
-    c.memory = _str(deploy, "deploy", "memory", "", _MEMORY)
-    cpus = deploy.get("cpus", "")
-    if isinstance(cpus, bool) or not isinstance(cpus, (int, float, str)):
-        raise ContractError("[deploy].cpus must be a number")
-    if cpus != "":
-        try:
-            ok = 0 < float(cpus) <= 64
-        except ValueError:
-            ok = False
-        if not ok:
-            raise ContractError(f"[deploy].cpus = {cpus!r} is not allowed")
-        c.cpus = str(cpus)
+    c.memory = _memory(deploy)
+    c.cpus = _cpus(deploy)
     c.slice = _str(deploy, "deploy", "slice", "")
     if c.slice and c.slice not in SLICES:
         raise ContractError(f"[deploy].slice: unknown slice {c.slice!r} (allowed: {', '.join(SLICES)})")
@@ -271,6 +320,9 @@ def _parse(c: Contract, data: dict) -> None:
     if len(set(c.networks)) != len(c.networks):
         raise ContractError("[deploy].networks: a network is listed twice")
     c.tmpfs = _strings(deploy, "deploy", "tmpfs", _TMPFS)
+    for t in c.tmpfs:
+        if _target(t.split(":", 1)[0]) == "/":
+            raise ContractError(f"[deploy].tmpfs: {t!r} would cover the whole filesystem")
     c.certs = _bool(deploy, "deploy", "certs")
     c.read_only = _bool(deploy, "deploy", "read_only")
     c.user = _str(deploy, "deploy", "user", "", _USER)
@@ -282,13 +334,22 @@ def _parse(c: Contract, data: dict) -> None:
         name, target, ro = m.get("name"), m.get("target"), m.get("read_only", False)
         if not isinstance(name, str) or not _NAME.fullmatch(name) or ".." in name:
             raise ContractError(f"{key}.name = {name!r}: a plain name, never a path")
-        if not isinstance(target, str) or not _PATH.fullmatch(target) or ".." in target or target == "/":
+        if not isinstance(target, str) or not _PATH.fullmatch(target) or ".." in target or _target(target) == "/":
             raise ContractError(f"{key}.target = {target!r}: an absolute path inside the container")
         if not isinstance(ro, bool):
             raise ContractError(f"{key}.read_only must be true or false")
         c.mounts.append(Mount(name, target, ro))
     if len({m.name for m in c.mounts}) != len(c.mounts):
         raise ContractError("[deploy].mounts: a name is used twice")
+    targets = [("[deploy].mounts", m.target) for m in c.mounts] + \
+        [("[deploy].tmpfs", t.split(":", 1)[0]) for t in c.tmpfs] + \
+        ([("[deploy].certs", CERTS_TARGET)] if c.certs else [])
+    seen: dict[str, str] = {}
+    for key, t in targets:
+        n = _target(t)
+        if n in seen:
+            raise ContractError(f"{key}: target {t!r} is already used by {seen[n]}")
+        seen[n] = key
     if c.health_scheme == "https" and not c.certs:
         raise ContractError("[service].health_scheme = \"https\" needs [deploy].certs = true")
 
@@ -332,22 +393,34 @@ def load_contract(src: Path, repo_name: str) -> Contract:
         c.has_dockerfile = True
         c.dockerfile_stages = [m.group(1).lower() for m in _FROM.finditer(df.read_text(errors="replace"))
                                if m.group(1)]
+        wanted = [(f"[staging].companions[{i}].target", x.target) for i, x in enumerate(c.companions)]
+        if c.integration_target:
+            wanted.append(("[test].target", c.integration_target))
+        for key, stage in wanted:
+            if stage not in c.dockerfile_stages:
+                raise ContractError(f"{key} = {stage!r}: the Dockerfile has no such stage")
     return c
+
+
+def volume_name(c: Contract, m: Mount, run_id: str = "") -> str:
+    """The Docker named volume behind a mount: fixed per service in production, per run in staging."""
+    return f"gmshield-ci-{run_id}-{c.service}-{m.name}" if run_id else f"gmshield-{c.service}-{m.name}"
 
 
 # ---------------------------------------------------------------- docker run arguments
 
 def container_args(c: Contract, s: Settings, role: str, *, name: str, image: str, network: str,
-                   labels: Sequence[str] = (), env_file: Path | None = None,
-                   mounts_dir: Path | None = None, certs_dir: Path | None = None,
-                   create: bool = False) -> list[str]:
+                   labels: Sequence[str] = (), env_file: Path | None = None, run_id: str = "",
+                   certs_dir: Path | None = None, create: bool = False) -> list[str]:
     """The one place that turns a contract into `docker run` (or `docker create`) arguments. Pure.
 
     role "production": the live container on `network` (the first of its networks); `create` makes it
     `docker create` so further networks can be connected before `docker start`.
     role "staging": the throwaway copy on a run's internal network, inside the CI slice, with
     GMSHIELD_MODE=test; `labels` are the run's labels.
-    `mounts_dir` holds one folder per mount name; `certs_dir` is mounted read-only at CERTS_TARGET.
+    Each mount is a Docker named volume (volume_name): `gmshield-<service>-<name>` in production, the
+    run's throwaway volume in staging (`run_id`, created beforehand with the run's labels). `certs_dir`
+    (the service's own certificates folder) is mounted read-only at CERTS_TARGET.
     """
     verb = ["docker", "create"] if create else ["docker", "run"]
     detach = [] if create else ["-d"]
@@ -383,11 +456,11 @@ def container_args(c: Contract, s: Settings, role: str, *, name: str, image: str
         cmd += ["--cgroup-parent", c.slice]
     for t in c.tmpfs:
         cmd += ["--tmpfs", t]
-    if c.mounts:
-        if mounts_dir is None:
-            raise ValueError("mounts declared but no mounts folder given")
-        for m in c.mounts:
-            cmd += ["-v", f"{mounts_dir / m.name}:{m.target}:{'ro' if m.read_only else 'rw'}"]
+    if c.mounts and role == "staging" and not run_id:
+        raise ValueError("staging mounts need the run id (their volumes are per run)")
+    for m in c.mounts:
+        cmd += ["-v", f"{volume_name(c, m, run_id if role == 'staging' else '')}:{m.target}:"
+                      f"{'ro' if m.read_only else 'rw'}"]
     if certs_dir is not None:
         cmd += ["-v", f"{certs_dir}:{CERTS_TARGET}:ro"]
     return cmd + [image]

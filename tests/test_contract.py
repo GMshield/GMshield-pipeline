@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gmshield_ci import config, dockerops, pipeline, stages
+from gmshield_ci import config, dockerops, pipeline, sonar, stages
 from gmshield_ci.config import ContractError, container_args, load_contract
 
 FIX = Path(__file__).parent / "fixtures"
@@ -21,7 +21,7 @@ def settings(home: Path = Path("/srv/ci"), **limits) -> config.Settings:
         home=home, org="GMshield", branches=("develop", "main"), registry="localhost:5000",
         prod_network="rpg_default", ci_slice="ci.slice", repos=[],
         images={"zap": "zap@sha256:1", "postgres": "postgres@sha256:2", "redis": "redis@sha256:3",
-                "jdk27": "jdk@sha256:4"},
+                "jdk27": "jdk@sha256:4", "sonar_scanner": "scanner@sha256:5"},
         semgrep_rulesets=[], limits=limits, gates={})
 
 
@@ -206,12 +206,13 @@ class OptionTest(unittest.TestCase):
 
     def test_mounts(self):
         c = self.opt('mounts = [{ name = "uploads", target = "/data" }, { name = "seed", target = "/s", read_only = true }]')
-        self.assertEqual(self.extra(c, mounts_dir=Path("/srv/ci/mounts/x")),
-                         ["-v", "/srv/ci/mounts/x/uploads:/data:rw", "-v", "/srv/ci/mounts/x/seed:/s:ro"])
+        self.assertEqual(self.extra(c), ["-v", "gmshield-x-uploads:/data:rw", "-v", "gmshield-x-seed:/s:ro"])
+        self.assertEqual(self.extra(c, "staging", run_id=RUN_ID),
+                         ["-v", f"gmshield-ci-{RUN_ID}-x-uploads:/data:rw", "-v", f"gmshield-ci-{RUN_ID}-x-seed:/s:ro"])
         for bad in ('"../etc"', '"a/b"', '"/abs"', '".."', '"a..b"', "1"):
             with self.assertRaisesRegex(ContractError, r"\[deploy\].mounts\[0\].name"):
                 self.opt(f'mounts = [{{ name = {bad}, target = "/data" }}]')
-        for bad in ('"data"', '"/"', '"/a/../b"', '"/a:rw"', '"/a,b"'):
+        for bad in ('"data"', '"/"', '"/."', '"//"', '"/./"', '"/a/../b"', '"/a:rw"', '"/a,b"'):
             with self.assertRaisesRegex(ContractError, r"\[deploy\].mounts\[0\].target"):
                 self.opt(f'mounts = [{{ name = "d", target = {bad} }}]')
         with self.assertRaisesRegex(ContractError, r"mounts\[0\]"):
@@ -291,27 +292,108 @@ class OptionTest(unittest.TestCase):
 
     def test_hardened_production_args(self):
         c = contract_from(HARDENED, repo="GMshield-api")
-        args = prod_args(c, mounts_dir=Path("/srv/ci/mounts/api"), certs_dir=Path("/srv/ci/certs"), create=True)
+        args = prod_args(c, certs_dir=Path("/srv/ci/certs/api"), create=True)
         self.assertEqual(args, [
             "docker", "create", "--name", "gmshield-api", "--network", "gmshield-app", "--restart", "unless-stopped",
             "--label", "gmshield.service=api", "--label", f"gmshield.sha={SHA}",
             "--read-only", "--user", "10001:10001", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--memory", "768m", "--cpus", "1.5", "--cgroup-parent", "containers.slice",
             "--tmpfs", "/tmp", "--tmpfs", "/run/app:size=16m",
-            "-v", "/srv/ci/mounts/api/uploads:/data/uploads:rw", "-v", "/srv/ci/mounts/api/seed:/seed:ro",
-            "-v", "/srv/ci/certs:/run/gmshield/certs:ro", f"localhost:5000/gmshield-api:{SHA}"])
+            "-v", "gmshield-api-uploads:/data/uploads:rw", "-v", "gmshield-api-seed:/seed:ro",
+            "-v", "/srv/ci/certs/api:/run/gmshield/certs:ro", f"localhost:5000/gmshield-api:{SHA}"])
 
     def test_staging_has_production_hardening_in_ci_slice(self):
         c = contract_from(HARDENED, repo="GMshield-api")
-        args = staging_args(c, mounts_dir=Path("/w/mounts"), certs_dir=Path("/w/certs"))
+        args = staging_args(c, run_id=RUN_ID, certs_dir=Path("/w/certs"))
         for flag in ("--read-only", "--cap-drop", "--memory", "--cpus", "--tmpfs", "--security-opt"):
             self.assertIn(flag, args)
         self.assertEqual([args[i + 1] for i, a in enumerate(args) if a == "--cgroup-parent"], ["ci.slice"])
 
-    def test_mounts_need_a_folder(self):
+    def test_staging_mounts_need_the_run(self):
         c = self.opt('mounts = [{ name = "d", target = "/d" }]')
         with self.assertRaises(ValueError):
-            prod_args(c)
+            staging_args(c)
+
+
+class ReviewPatchTest(unittest.TestCase):
+    """Validation added after the first review: each refusal names its key."""
+    def opt(self, deploy: str = "", service: str = "port = 80", rest: str = "", dockerfile=None):
+        return contract_from(f'[service]\nname="x"\n{service}\n[deploy]\n{deploy}\n{rest}', dockerfile)
+
+    def test_env_keys_must_be_variable_names(self):
+        for sect in ("deploy", "staging"):
+            for bad in ('"GMSHIELD_MODE=prod"', '"A B"', '"1A"', '"A-B"', '""'):
+                with self.assertRaisesRegex(ContractError, rf"\[{sect}\].env"):
+                    self.opt(rest=f"[{sect}]\nenv = {{ {bad} = \"x\" }}" if sect == "staging" else "",
+                             deploy=f"env = {{ {bad} = \"x\" }}" if sect == "deploy" else "")
+        with self.assertRaisesRegex(ContractError, r"\[deploy\].env.A must be a plain value"):
+            self.opt('env = { A = [1] }')
+        self.assertEqual(self.opt('env = { _A1 = 1 }').env, {"_A1": "1"})
+
+    def test_cpus_minimum_and_normalised(self):
+        for given, want in (("0.01", "0.01"), ('"1.50"', "1.5"), ("2.0", "2"), ('"3"', "3"), ("64", "64")):
+            self.assertEqual(self.opt(f"cpus = {given}").cpus, want)
+        for bad in ("0.0001", "0.009", '" 2"', '"1e1"', '"inf"', "inf", "nan", "65", "-1"):
+            with self.assertRaisesRegex(ContractError, r"\[deploy\].cpus"):
+                self.opt(f"cpus = {bad}")
+
+    def test_memory_minimum(self):
+        for ok in ('"6m"', '"6291456"', '"6144k"', '"1g"', '"512m"'):
+            self.assertEqual(self.opt(f"memory = {ok}").memory, ok.strip('"'))
+        for bad in ('"1b"', '"5m"', '"6291455"', '" 512m"', '"512M"', '"512mb"', '"0m"'):
+            with self.assertRaisesRegex(ContractError, r"\[deploy\].memory"):
+                self.opt(f"memory = {bad}")
+
+    def test_duplicate_or_root_targets(self):
+        cases = [
+            ('mounts = [{ name = "a", target = "/d" }, { name = "b", target = "/d/" }]', r"\[deploy\].mounts: target"),
+            ('mounts = [{ name = "a", target = "/d" }]\ntmpfs = ["/d:size=1m"]', r"\[deploy\].tmpfs: target '/d'"),
+            ('tmpfs = ["/t", "//t"]', r"\[deploy\].tmpfs: target"),
+            ('certs = true\ntmpfs = ["/run/gmshield/certs"]', r"\[deploy\].certs: target"),
+            ('certs = true\nmounts = [{ name = "a", target = "/run/gmshield/./certs" }]', r"\[deploy\].certs"),
+        ]
+        for deploy, key in cases:
+            with self.assertRaisesRegex(ContractError, key):
+                self.opt(deploy)
+        for bad in ('"/"', '"/."', '"//"', '"/:size=1m"'):
+            with self.assertRaisesRegex(ContractError, r"\[deploy\].tmpfs"):
+                self.opt(f"tmpfs = [{bad}]")
+        self.assertEqual(self.opt('tmpfs = ["/run/gmshield"]\ncerts = true').tmpfs, ["/run/gmshield"])
+
+    def test_ports(self):
+        for key, sect in (("port", "service"), ("host_port", "deploy")):
+            for bad in ("inf", "nan", '"80"', "8080.0", "-1", "65536", "true"):
+                text = (f'[service]\nname="x"\n{key} = {bad}\n' if sect == "service"
+                        else f'[service]\nname="x"\nport = 80\n[deploy]\n{key} = {bad}\n')
+                with self.assertRaisesRegex(ContractError, rf"\[{sect}\].{key}"):
+                    contract_from(text)
+        self.assertEqual(self.opt("host_port = 65535", "port = 0").host_port, 65535)
+
+    def test_service_name(self):
+        for bad in ('""', '"---"', '"!!"', "1"):
+            with self.assertRaisesRegex(ContractError, r"\[service\].name"):
+                contract_from(f"[service]\nname = {bad}\n")
+        self.assertEqual(contract_from('[service]\nname = "My App"\n').service, "my-app")
+
+    def test_stages_must_exist_in_the_dockerfile(self):
+        df = "FROM a AS test\nFROM a AS integration\nFROM b\n"
+        with self.assertRaisesRegex(ContractError, r"\[staging\].companions\[0\].target = 'stand-in'.*no such stage"):
+            self.opt(rest='[[staging.companions]]\ntarget = "stand-in"\nalias = "s"', dockerfile=df)
+        with self.assertRaisesRegex(ContractError, r"\[test\].target = 'it'.*no such stage"):
+            self.opt(rest='[test]\ntarget = "it"', dockerfile=df)
+        self.assertEqual(self.opt(rest='[test]\ntarget = "Integration"', dockerfile=df).integration_target,
+                         "integration")
+        self.assertEqual(self.opt(rest='[test]\ntarget = "it"').integration_target, "it")   # no Dockerfile yet
+
+    def test_url_paths(self):
+        for ok in ("/", "/actuator/health", "/api/health?full=1&x=y", "/a%20b", "/v3/api-docs:x"):
+            self.assertEqual(self.opt(service=f'port = 80\nhealth_path = "{ok}"').health_path, ok)
+            self.assertEqual(self.opt(rest=f'[dast]\npath = "{ok}"').dast_path, ok)
+        for bad in ("health", "/a'b", "/a b", "/$(id)", "/a`b`", "/a;b'", '/a\\"', "", "/a\\nb"):
+            with self.assertRaisesRegex(ContractError, r"\[service\].health_path"):
+                self.opt(service=f'port = 80\nhealth_path = "{bad}"')
+            with self.assertRaisesRegex(ContractError, r"\[dast\].path"):
+                self.opt(rest=f'[dast]\npath = "{bad}"')
 
 
 class ForbiddenTest(unittest.TestCase):
@@ -326,7 +408,7 @@ class ForbiddenTest(unittest.TestCase):
             contract_from("[deploy\n")
         with self.assertRaisesRegex(ContractError, r"\[staging\] must be a table"):
             contract_from('staging = "x"')
-        with self.assertRaisesRegex(ContractError, "pipeline.toml"):
+        with self.assertRaisesRegex(ContractError, r"\[service\].port"):
             contract_from('[service]\nport = "eighty"')
 
     def test_resolve_fails_naming_the_key(self):
@@ -366,11 +448,13 @@ class RuntimeTest(unittest.TestCase):
         self.cmds = []
         self.capture_rc = {}
         self.fail_once = set()
+        self.inspected = {("gmshield-api", "{{.Config.Image}}"): "localhost:5000/gmshield-api:old",
+                          ("gmshield-api", "{{.State.Running}}"): "true"}
         self.patches = [
             mock.patch.object(stages, "sh", self.fake_sh),
             mock.patch.object(stages, "capture", self.fake_capture),
             mock.patch.object(stages, "container_logs", lambda name, dest: Path(dest).write_text("log")),
-            mock.patch.object(stages, "inspect", lambda *a: "localhost:5000/gmshield-api:old"),
+            mock.patch.object(stages, "inspect", lambda obj, fmt: self.inspected.get((obj, fmt))),
             mock.patch.object(stages, "_zap", lambda run, net, base, outdir, active:
                               ("ok", {"base": base, "net": net}, [], "zap")),
         ]
@@ -406,29 +490,49 @@ class RuntimeTest(unittest.TestCase):
             s=s, contract=c, id=RUN_ID, sha=SHA, dir=d, work=self.tmp / "work", src=self.tmp / "src",
             docker=FakeDocker(), local_image=f"gmshield-ci/api:{SHA}", prod_image=f"localhost:5000/gmshield-api:{SHA}",
             prod_name="gmshield-api", image_built=True, deployed=False, rolled_back=False, previous_image=None,
-            repo=types.SimpleNamespace(url="file:///x"))
+            previous_kept=False, previous_running=False, repo=types.SimpleNamespace(url="file:///x"))
 
     def docker_cmds(self, verb):
         return [c for c in self.cmds if c[:2] == ["docker", verb]]
 
     # -- hardened production with two networks
+    def certs(self, ca=True):
+        d = self.tmp / "home" / "certs" / "api"
+        d.mkdir(parents=True)
+        if ca:
+            (d / "ca.crt").write_text("ca")
+        return d
+
+    def prod_cmds(self):
+        """Every docker command that touches containers, in order (network inspects excluded)."""
+        return [c for c in self.cmds if c[:1] == ["docker"] and c[1] in ("rm", "stop", "rename", "create", "run",
+                                                                           "start", "network")
+                and c[:3] != ["docker", "network", "inspect"]]
+
     def test_deploy_creates_connects_then_starts(self):
-        (self.tmp / "home" / "certs").mkdir(parents=True)
-        (self.tmp / "home" / "certs" / "ca.crt").write_text("ca")
+        certs = self.certs()
         run = self.run_for(HARDENED)
         outcome, _, _, detail = stages.deploy(run)
         self.assertEqual(outcome, "ok", detail)
-        order = [c[1] for c in self.cmds if c[:1] == ["docker"] and c[1] in ("rm", "create", "network", "start")]
-        self.assertEqual(order, ["network", "network", "rm", "create", "network", "start"])   # 2 inspects first
+        inspects = [c[3] for c in self.cmds if c[:3] == ["docker", "network", "inspect"]]
+        self.assertEqual(inspects, ["gmshield-app", "gmshield-data"])
+        self.assertEqual(self.cmds.index(["docker", "network", "inspect", "gmshield-data"]), 1)   # checked first
+        verbs = [c[:2] + ([c[2]] if c[1] == "network" else []) for c in self.prod_cmds()]
+        self.assertEqual(verbs, [["docker", "rm"], ["docker", "stop"], ["docker", "rename"], ["docker", "rm"],
+                                 ["docker", "create"], ["docker", "network", "connect"], ["docker", "start"]])
+        self.assertIn(["docker", "rm", "-f", "gmshield-api-previous"], self.cmds)     # a stale copy, if any
+        self.assertIn(["docker", "rename", "gmshield-api", "gmshield-api-previous"], self.cmds)
         self.assertEqual(self.docker_cmds("network")[-1], ["docker", "network", "connect", "gmshield-data", "gmshield-api"])
-        for name in ("uploads", "seed"):
-            d = self.tmp / "home" / "mounts" / "api" / name
-            self.assertEqual(d.stat().st_mode & 0o777, 0o700)
+        create = self.docker_cmds("create")[0]
+        self.assertIn("gmshield-api-uploads:/data/uploads:rw", create)               # named volumes, no host path
+        self.assertIn(f"{certs}:/run/gmshield/certs:ro", create)                     # this service's folder only
+        self.assertFalse((self.tmp / "home" / "mounts").exists())
+        self.assertTrue(run.previous_kept)                                           # kept until the release stands
         name, image, args, kw = run.docker.calls[-1]                 # the HTTPS probe
         self.assertEqual(kw["network"], "gmshield-app")              # the app's own network only
         self.assertIn("--cacert /certs/ca.crt", args[2])
         self.assertIn("https://gmshield-api:8443/", args[2])
-        self.assertEqual(kw["mounts"], [(self.tmp / "home" / "certs" / "ca.crt", "/certs/ca.crt", "ro")])
+        self.assertEqual(kw["mounts"], [(certs / "ca.crt", "/certs/ca.crt", "ro")])
 
     def test_missing_network_is_named_and_production_untouched(self):
         self.capture_rc["inspect gmshield-data"] = 1
@@ -436,9 +540,9 @@ class RuntimeTest(unittest.TestCase):
         outcome, _, _, detail = stages.deploy(run)
         self.assertEqual(outcome, "error")
         self.assertIn("gmshield-data", detail)
-        self.assertEqual(self.docker_cmds("rm") + self.docker_cmds("create"), [])
+        self.assertEqual(self.prod_cmds(), [])
 
-    def test_connect_failure_rolls_back(self):
+    def test_connect_failure_restores_the_previous_container(self):
         self.capture_rc["docker network connect"] = 1
         self.fail_once.add("docker network connect")
         run = self.run_for('[service]\nport = 80\n[deploy]\nnetworks = ["gmshield-app", "gmshield-data"]\n')
@@ -446,14 +550,80 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(outcome, "error")
         self.assertIn("cannot connect to network gmshield-data", detail)
         self.assertIn("rolled back to localhost:5000/gmshield-api:old", detail)
-        self.assertEqual(len(self.docker_cmds("start")), 1)            # only the previous version started
+        cmds = self.prod_cmds()
+        i = cmds.index(["docker", "network", "connect", "gmshield-data", "gmshield-api"])
+        self.assertEqual(cmds[i + 1:], [["docker", "rm", "-f", "gmshield-api"],
+                                        ["docker", "rename", "gmshield-api-previous", "gmshield-api"],
+                                        ["docker", "start", "gmshield-api"]])   # the same container, not rebuilt
+        self.assertEqual(len(self.docker_cmds("create")), 1)
+        self.assertTrue(run.rolled_back)
+        self.assertFalse(run.previous_kept)
+
+    def test_unhealthy_restores_a_stopped_previous_as_stopped(self):
+        self.inspected[("gmshield-api", "{{.State.Running}}")] = "false"
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        outcome, _, files, detail = stages.deploy(run)
+        self.assertEqual(outcome, "error")
+        self.assertIn("unhealthy", detail)
+        self.assertIn("deploy-app.log", files)
+        self.assertEqual(self.prod_cmds()[-2:], [["docker", "rm", "-f", "gmshield-api"],
+                                                 ["docker", "rename", "gmshield-api-previous", "gmshield-api"]])
+
+    def test_no_previous_container_removes_the_new_one(self):
+        self.inspected.clear()
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        outcome, _, _, detail = stages.deploy(run)
+        self.assertIn("no previous version; container removed", detail)
+        self.assertEqual(self.docker_cmds("stop") + self.docker_cmds("rename"), [])
+        self.assertEqual(self.prod_cmds()[-1], ["docker", "rm", "-f", "gmshield-api"])
+
+    def test_previous_left_by_an_interrupted_deploy_is_the_rollback_target(self):
+        self.inspected = {("gmshield-api-previous", "{{.Config.Image}}"): "localhost:5000/gmshield-api:older"}
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        _, _, _, detail = stages.deploy(run)
+        self.assertIn("rolled back to localhost:5000/gmshield-api:older", detail)
+        self.assertNotIn(["docker", "rm", "-f", "gmshield-api-previous"], self.cmds)
+        self.assertEqual(self.prod_cmds()[-2:], [["docker", "rename", "gmshield-api-previous", "gmshield-api"],
+                                                 ["docker", "start", "gmshield-api"]])
+
+    def test_current_container_that_cannot_be_set_aside_keeps_running(self):
+        self.capture_rc["docker rename gmshield-api"] = 1
+        run = self.run_for('[service]\nport = 80\n')
+        outcome, _, _, detail = stages.deploy(run)
+        self.assertEqual(outcome, "error")
+        self.assertIn("production unchanged", detail)
+        self.assertEqual(self.docker_cmds("create") + self.docker_cmds("run"), [])
+        self.assertEqual(self.docker_cmds("start"), [["docker", "start", "gmshield-api"]])
+
+    def test_discard_previous(self):
+        run = self.run_for('[service]\nport = 80\n')
+        self.assertEqual(stages.deploy(run)[0], "ok")
+        stages.discard_previous(run)
+        self.assertEqual(self.cmds[-1], ["docker", "rm", "-f", "gmshield-api-previous"])
+        self.assertFalse(run.previous_kept)
+        n = len(self.cmds)
+        stages.discard_previous(run)
+        self.assertEqual(len(self.cmds), n)
 
     def test_missing_ca_is_a_deploy_error(self):
+        self.certs(ca=False)
         run = self.run_for('[service]\nport = 443\nhealth_scheme = "https"\n[deploy]\ncerts = true\n')
         outcome, _, _, detail = stages.deploy(run)
         self.assertEqual(outcome, "error")
-        self.assertIn("ca.crt", detail)
-        self.assertEqual(self.docker_cmds("rm"), [])
+        self.assertIn("certs/api/ca.crt missing", detail)
+        self.assertEqual(self.prod_cmds(), [])
+
+    def test_missing_service_certs_folder_is_a_deploy_error(self):
+        """Docker would otherwise create an empty, root-owned folder in its place."""
+        (self.tmp / "home" / "certs").mkdir(parents=True)
+        run = self.run_for('[service]\nport = 80\n[deploy]\ncerts = true\n')
+        outcome, _, _, detail = stages.deploy(run)
+        self.assertEqual(outcome, "error")
+        self.assertIn("certs/api missing", detail)
+        self.assertEqual(self.prod_cmds(), [])
 
     def test_default_deploy_uses_docker_run(self):
         run = self.run_for('[service]\nport = 80\n')
@@ -496,6 +666,30 @@ class RuntimeTest(unittest.TestCase):
             self.assertIn(f"gmshield-ci-{RUN_ID}-{n}", removed)
         self.assertIn(["docker", "network", "rm", f"gmshield-ci-{RUN_ID}"], self.cmds)
         self.assertIn(["docker", "rmi", f"gmshield-ci/api-stand-in-backend:{SHA}"], self.cmds)
+        self.assertIn(f"gmshield-ci.run={RUN_ID}", build)                    # crash cleanup finds the image
+        comp = run.docker.calls[2][3]
+        self.assertEqual(comp["env"], {"GMSHIELD_MODE": "test"})
+
+    def test_staging_mounts_are_run_labelled_volumes(self):
+        run = self.run_for('[service]\nport = 80\n[deploy]\nuser = "10001"\n'
+                           'mounts = [{ name = "uploads", target = "/data" }]\n')
+        outcome, _, _, detail = stages.dast_staging(run)
+        self.assertEqual(outcome, "ok", detail)
+        vol = f"gmshield-ci-{RUN_ID}-api-uploads"
+        create = self.docker_cmds("volume")[0]
+        self.assertEqual(create[:3], ["docker", "volume", "create"])
+        self.assertEqual(create[-1], vol)
+        self.assertIn(f"gmshield-ci.run={RUN_ID}", create)
+        self.assertIn(f"{vol}:/data:rw", self.docker_cmds("run")[0])
+        self.assertIn(["docker", "volume", "rm", "-f", vol], self.cmds)
+        self.assertFalse((run.work / "mounts").exists())
+
+    def test_staging_volume_failure(self):
+        self.capture_rc["docker volume create"] = 1
+        run = self.run_for('[service]\nport = 80\n[deploy]\nmounts = [{ name = "uploads", target = "/data" }]\n')
+        outcome, _, _, detail = stages.dast_staging(run)
+        self.assertEqual((outcome, detail), ("error", "cannot create the staging volume for mount 'uploads'"))
+        self.assertEqual(self.docker_cmds("run"), [])
 
     def test_staging_service_not_ready(self):
         self.capture_rc["exec"] = 1
@@ -544,6 +738,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(outcome, "ok", detail)
         build = next(c for c in self.cmds if c[:3] == ["docker", "buildx", "build"])
         self.assertEqual(build[build.index("--target") + 1], "integration")
+        self.assertIn(f"gmshield-ci.run={RUN_ID}", build)
         svc, test = run.docker.calls
         self.assertEqual((svc[0], svc[3]["network"]), ("it-postgres", f"gmshield-ci-{RUN_ID}-it"))
         self.assertEqual((test[0], test[1]), ("integration", f"gmshield-ci/api-integration:{SHA}"))
@@ -579,6 +774,202 @@ class FlowTest(unittest.TestCase):
                 mock.patch.object(pipeline.stages, "execute", lambda run, key, *a: order.append(key) or []):
             pipeline.develop_flow(run)
         self.assertEqual(order, ["sonar", "image", "integration_tests", "dast"])
+
+
+class MainFlowTest(unittest.TestCase):
+    """The kept previous container: discarded once the release stands, restored after a failed DAST."""
+    def flow(self, dast_status: str, rollback_on_fail: bool = True):
+        calls = []
+        run = types.SimpleNamespace(
+            records=[], notes=[], deployed=False, contract=types.SimpleNamespace(has_dockerfile=True, self_update=False),
+            repo=types.SimpleNamespace(name="GMshield-x"), dir=Path("/nonexistent"),
+            s=types.SimpleNamespace(state_dir=Path("/nonexistent"),
+                                    gates={"dast_main": {"rollback_on_fail": rollback_on_fail}}))
+
+        def execute(run, key, title, gate, fn, *a):
+            if key == "deploy":
+                run.deployed = True
+            r = stages.Record(key, title, gate, status=dast_status if key == "dast_prod" else "passed")
+            run.records.append(r)
+            return [r]
+        with mock.patch.object(pipeline, "_read", lambda *a: {}), \
+                mock.patch.object(pipeline.stages, "execute", execute), \
+                mock.patch.object(pipeline.stages, "rollback", lambda run, log: calls.append("rollback") or "rolled"), \
+                mock.patch.object(pipeline.stages, "discard_previous", lambda run: calls.append("discard")), \
+                mock.patch.object(pipeline.stages, "mark_prod", lambda run: None):
+            pipeline.main_flow(run)
+        return calls
+
+    def test_passed_dast_discards_the_previous_container(self):
+        self.assertEqual(self.flow("passed"), ["discard"])
+
+    def test_failed_dast_restores_it(self):
+        self.assertEqual(self.flow("failed"), ["rollback"])
+
+    def test_failed_dast_without_rollback_discards_it(self):
+        self.assertEqual(self.flow("failed", rollback_on_fail=False), ["discard"])
+
+
+class CleanupTest(unittest.TestCase):
+    def test_cleanup_label_removes_containers_networks_volumes_and_stage_images(self):
+        ran = []
+        listed = {"ps": "c1", "network": "n1", "volume": "v1 v2", "image": "i1 i1"}
+        with mock.patch.object(dockerops, "capture", lambda cmd, timeout=120: (0, listed[cmd[1]])), \
+                mock.patch.object(dockerops, "sh", lambda cmd, *a, **k: ran.append(cmd) or 0):
+            dockerops.cleanup_label("gmshield-ci.run=r")
+        self.assertEqual(ran, [["docker", "rm", "-f", "-v", "c1"], ["docker", "network", "rm", "n1"],
+                               ["docker", "volume", "rm", "-f", "v1", "v2"], ["docker", "image", "rm", "-f", "i1"]])
+
+    def test_nothing_listed_nothing_removed(self):
+        ran = []
+        with mock.patch.object(dockerops, "capture", lambda cmd, timeout=120: (0, "")), \
+                mock.patch.object(dockerops, "sh", lambda cmd, *a, **k: ran.append(cmd) or 0):
+            dockerops.cleanup_label("gmshield-ci.run=r")
+        self.assertEqual(ran, [])
+
+
+class SonarTest(unittest.TestCase):
+    """sonar.analyze and jdk_home with Docker and the SonarQube API replaced."""
+    DIGEST = "4"
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.sh_calls = []
+        self.copy_ok = True
+        self.scanner_rc = 0
+        self.scanner_log = "INFO done\n"
+        for p in (mock.patch.object(sonar, "sh", self.fake_sh),
+                  mock.patch.object(sonar.Session, "ensure_up", classmethod(lambda cls, *a, **k: None)),
+                  mock.patch.object(sonar, "token", lambda: "tok"),
+                  mock.patch.object(sonar, "api", self.fake_api),
+                  mock.patch.object(sonar.time, "sleep", lambda s: None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def fake_sh(self, cmd, log=None, timeout=600, env=None, cwd=None):
+        self.sh_calls.append(cmd)
+        if cmd[:2] == ["docker", "cp"] and self.copy_ok:
+            dest = Path(cmd[3])
+            dest.mkdir(parents=True)
+            (dest / "release").write_text('JAVA_VERSION="27"')
+        return 0
+
+    def fake_api(self, method, path, params=None, auth=None, timeout=30):
+        return 200, {"/api/ce/task": {"task": {"status": "SUCCESS", "analysisId": "a1"}},
+                     "/api/qualitygates/project_status": {"projectStatus": {"status": "OK", "conditions": []}},
+                     }.get(path, {})
+
+    def run_obj(self):
+        s = settings(self.tmp / "home", sonar=60)
+        run = types.SimpleNamespace(s=s, id=RUN_ID, sha=SHA, dir=self.tmp / "art", work=self.tmp / "work",
+                                    src=self.tmp / "src", repo=types.SimpleNamespace(name="GMshield-backend"))
+        run.dir.mkdir()
+        run.src.mkdir()
+        test = self
+
+        class Docker(FakeDocker):
+            def run(self, name, image, args, **kw):
+                self.calls.append((name, image, args, kw))
+                kw["log"].write_text(test.scanner_log)
+                if test.scanner_rc == 0:
+                    (run.src / ".scannerwork").mkdir(exist_ok=True)
+                    (run.src / ".scannerwork" / "report-task.txt").write_text("ceTaskId=t1\ndashboardUrl=x\n")
+                return test.scanner_rc
+        run.docker = Docker()
+        return run
+
+    def reports(self, run, classes=True, jars=("a.jar",)):
+        r = run.dir / "unit-tests"
+        if classes:
+            (r / "classes").mkdir(parents=True)
+        if jars is not None:
+            (r / "libraries").mkdir(parents=True)
+            for j in jars:
+                (r / "libraries" / j).write_text("jar")
+
+    def scan(self, run):
+        outcome, metrics, files, detail = sonar.analyze(run)
+        name, image, args, kw = run.docker.calls[0]
+        return outcome, metrics, args, kw
+
+    def test_jdk_home_and_libraries_passed(self):
+        run = self.run_obj()
+        self.reports(run)
+        outcome, m, args, kw = self.scan(run)
+        self.assertEqual(outcome, "ok")
+        jdk = run.s.cache / "jdk" / self.DIGEST
+        self.assertIn("-Dsonar.java.binaries=.gmshield-reports/classes", args)
+        self.assertIn(f"-Dsonar.java.jdkHome={sonar.JDK_MOUNT}", args)
+        self.assertIn((jdk, sonar.JDK_MOUNT, "ro"), kw["mounts"])
+        self.assertIn("-Dsonar.java.libraries=.gmshield-reports/libraries/*.jar", args)
+        self.assertIn("-Dsonar.java.test.libraries=.gmshield-reports/classes,.gmshield-reports/libraries/*.jar", args)
+        self.assertEqual(m["warnings"], [])
+        self.assertTrue((jdk / "release").is_file())
+        self.assertIn(["docker", "rm", "-f", "-v", f"gmshield-ci-{RUN_ID}-jdk"], self.sh_calls)
+
+    def test_jdk_cache_is_reused(self):
+        run = self.run_obj()
+        jdk = run.s.cache / "jdk" / self.DIGEST
+        jdk.mkdir(parents=True)
+        (jdk / "release").write_text("x")
+        self.assertEqual(sonar.jdk_home(run, run.dir / "l.log"), jdk)
+        self.assertEqual(self.sh_calls, [])
+
+    def test_incomplete_jdk_cache_is_replaced(self):
+        run = self.run_obj()
+        jdk = run.s.cache / "jdk" / self.DIGEST
+        jdk.mkdir(parents=True)
+        (jdk / "stale").write_text("x")                      # no release file: an interrupted copy
+        self.assertEqual(sonar.jdk_home(run, run.dir / "l.log"), jdk)
+        self.assertTrue((jdk / "release").is_file())
+        self.assertFalse((jdk / "stale").exists())
+
+    def test_failed_copy_warns_without_gate_change(self):
+        self.copy_ok = False
+        run = self.run_obj()
+        self.reports(run)
+        outcome, m, args, _ = self.scan(run)
+        self.assertEqual((outcome, m["status"]), ("ok", "OK"))
+        self.assertFalse(any("jdkHome" in a for a in args))
+        self.assertTrue(any("could not be prepared" in w for w in m["warnings"]))
+        self.assertFalse((run.s.cache / "jdk" / self.DIGEST).exists())
+        self.assertFalse((run.s.cache / "jdk" / f"{self.DIGEST}.partial").exists())
+
+    def test_no_libraries_without_jars(self):
+        for jars in ((), None):
+            with self.subTest(jars=jars):
+                shutil.rmtree(self.tmp, ignore_errors=True)
+                self.tmp.mkdir()
+                run = self.run_obj()
+                self.reports(run, jars=jars)
+                _, _, args, _ = self.scan(run)
+                self.assertFalse(any("libraries" in a for a in args))
+
+    def test_no_java_no_jdk(self):
+        run = self.run_obj()
+        _, m, args, kw = self.scan(run)
+        self.assertFalse(any(a.startswith("-Dsonar.java") for a in args))
+        self.assertEqual(self.sh_calls, [])
+        self.assertEqual(m["warnings"], [])
+
+    def test_unresolved_types_warn(self):
+        self.scanner_log = "WARN Unresolved imports/types have been detected during analysis.\n"
+        run = self.run_obj()
+        self.reports(run)
+        outcome, m, _, _ = self.scan(run)
+        self.assertEqual((outcome, m["status"]), ("ok", "OK"))
+        self.assertTrue(any("Unresolved imports/types" in w for w in m["warnings"]))
+
+    def test_warnings_kept_when_the_scanner_fails(self):
+        self.copy_ok = False
+        self.scanner_rc = 2
+        self.scanner_log = "WARN Unresolved imports/types\n"
+        run = self.run_obj()
+        self.reports(run)
+        outcome, m, _, _ = self.scan(run)
+        self.assertEqual(outcome, "error")
+        self.assertEqual(len(m["warnings"]), 2)
 
 
 class ToolsTest(unittest.TestCase):

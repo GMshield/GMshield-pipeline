@@ -26,7 +26,8 @@ push to main ────► Resolve flow              (only via pull request fr
                     ► Promotion check        (this exact tree must have passed develop, else BLOCKED)
                     ► Container image        (rebuild + image gate, catches CVEs published since)
                     ► Publish image          (localhost:5000/gmshield-<service>:<sha>)
-                    ► Deploy (prd)           (health-checked; unhealthy -> automatic rollback)
+                    ► Deploy (prd)           (health-checked; unhealthy -> the previous container,
+                                              kept stopped as gmshield-<service>-previous, is restored)
                     ► DAST post-deploy       (ZAP passive baseline; gate fail -> rollback)
                     ► Release                (artifacts/<repo>/releases/<tag>, :prod tag, GitHub release)
 ```
@@ -107,17 +108,28 @@ these options existed. The template documents each option and its default; in sh
 
 | Table | Options | What they do |
 |---|---|---|
-| `[service]` | `health_scheme` | `"https"`: probes verify the app with `curl --cacert /certs/ca.crt` (only the CA certificate is mounted into the probe). Needs `certs = true`. |
-| `[deploy]` | `memory`, `cpus` | Limits, in production and staging alike |
+| `[service]` | `port`, `health_path` | Integer 0-65535; a URL path of letters, digits and `._~%:@+,;=/-` (an optional `?query` may add `&`). `[dast].path` follows the same rule. |
+| | `health_scheme` | `"https"`: probes verify the app with `curl --cacert /certs/ca.crt` (only the CA certificate is mounted into the probe). Needs `certs = true`. |
+| `[deploy]` | `memory`, `cpus` | Limits, in production and staging alike. `memory` such as `"512m"`, at least `6m`; `cpus` from 0.01 to 64 (normalised, e.g. `"1.50"` -> `1.5`). |
 | | `slice` | Production cgroup slice: `containers.slice` or `ai.slice`. Staging always runs in `ci.slice`. |
 | | `networks` | Production networks: created on the first, `docker network connect` to the rest, then started. Probes and ZAP join the first only. Every network is checked first; a missing one fails the deploy and production is not touched. |
 | | `read_only`, `user`, `cap_drop`, `tmpfs` | Hardening, in production and staging alike; any of the first three adds `--security-opt no-new-privileges` |
-| | `mounts` | `{ name, target, read_only }`: the source is a name, never a host path. Production: `~/gmshield-ci/mounts/<service>/<name>` (created 0700); staging: a fresh folder per run. |
-| | `certs` | Production: `~/gmshield-ci/certs` read-only at `/run/gmshield/certs`. Staging: a throwaway CA and leaf (`ca.crt`, `tls.crt`, `tls.key`, for `app` and `<service>`) made with `openssl` for that run; the private authority never enters `ci.slice`. |
+| | `mounts` | `{ name, target, read_only }`: the source is a name, never a host path. Production: the Docker named volume `gmshield-<service>-<name>`; staging: a throwaway volume of the run (`gmshield-ci-<run>-<service>-<name>`, carrying the run's label, removed afterwards and by crash cleanup). Docker fills a new volume from the image's folder at `target`, owner included, so the image should create that folder owned by its user. Two mounts, tmpfs entries or the certificates may not share a target, and no target may be `/`. |
+| | `certs` | Production: the service's own folder `~/gmshield-ci/certs/<service>/` (`tls.crt`, `tls.key`, `ca.crt`; never another service's key or the CA key) read-only at `/run/gmshield/certs`; a missing folder (or, with `"https"`, a missing `ca.crt` in it) fails the deploy before production is touched. Staging: a throwaway CA and leaf (`ca.crt`, `tls.crt`, `tls.key`, for `app` and `<service>`) made with `openssl` for that run; the private authority never enters `ci.slice`. |
 | `[staging]` | `env` | Added over `[deploy].env` in staging only |
 | | `services` | `postgres` and/or `redis`, started on the run's internal network under those names and ready (`pg_isready`, `redis-cli ping`) before the app starts |
-| | `companions` | `[[staging.companions]] target, alias`: that Dockerfile stage is built and run beside the app |
-| `[test]` | `target`, `services` | Integration tests on develop (full run, after the image): the stage runs on an internal network beside its services, exit 0 passes, limit `limits.integration_tests` (1800 s). No target: skipped. |
+| | `companions` | `[[staging.companions]] target, alias`: that Dockerfile stage (it must exist) is built and run beside the app as a stand-in, with `GMSHIELD_MODE=test` but without the contract's limits and hardening |
+| `[test]` | `target`, `services` | Integration tests on develop (full run, after the image): the stage (it must exist) runs on an internal network beside its services, exit 0 passes, limit `limits.integration_tests` (1800 s). No target: skipped. |
+
+Env keys (`[deploy].env`, `[staging].env`) must be variable names (`[A-Za-z_][A-Za-z0-9_]*`).
+
+**Deploy and rollback.** Before production is touched, the pipeline checks every network and the
+certificates folder. It then stops the current container and renames it, unchanged,
+`gmshield-<service>-previous`, and creates the new one. If the new container cannot be created,
+connected or started, is unhealthy, or fails the post-deploy DAST gate, it is removed and the previous
+container is renamed back and started exactly as it was (its own image, networks, mounts and
+settings, not rebuilt from the new contract). Once the release stands, the previous container is
+removed. Named volumes are never removed by a deploy.
 
 **Test mode.** The pipeline alone sets `GMSHIELD_MODE=test`, in the staging copy, its companions and
 the integration tests; a contract that names `GMSHIELD_MODE` in any env table is refused. The
@@ -125,7 +137,8 @@ throwaway services use fixed credentials that match GMshield-backend's `applicat
 Postgres at `postgres:5432` with database and user `gmshield` and password `gmshield-test-mode`; Redis
 at `redis:6379` without a password. Their images are pinned in `tools.toml`; they join only the run's
 internal network, carry the run's label, keep their data in memory, and are removed when the stage
-ends (and by the crash cleanup). Never asked for: host paths, `--privileged`, `--cap-add`, host
+ends (and by the crash cleanup, which also removes the run's labelled volumes and companion and
+integration-test images). Never asked for: host paths, `--privileged`, `--cap-add`, host
 networking.
 
 ## Artifacts and results

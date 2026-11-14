@@ -82,7 +82,7 @@ class Docker:
         return rc
 
     def cleanup(self) -> None:
-        """Remove every container and network this run created (also after a crash)."""
+        """Remove every container, network, volume and stage image this run created (also after a crash)."""
         cleanup_label(self.label)
 
 
@@ -93,6 +93,12 @@ def cleanup_label(label: str) -> None:
     _, nets = capture(["docker", "network", "ls", "-q", "--filter", f"label={label}"])
     if nets:
         sh(["docker", "network", "rm", *nets.split()], None, 120)
+    _, vols = capture(["docker", "volume", "ls", "-q", "--filter", f"label={label}"])
+    if vols:
+        sh(["docker", "volume", "rm", "-f", *vols.split()], None, 120)    # staging mounts
+    _, imgs = capture(["docker", "image", "ls", "-q", "--filter", f"label={label}"])
+    if imgs:
+        sh(["docker", "image", "rm", "-f", *sorted(set(imgs.split()))], None, 300)  # companion and test stages
 
 
 def inspect(obj: str, fmt: str) -> str | None:

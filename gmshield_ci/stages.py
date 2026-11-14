@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import gates
-from .config import Contract, container_args
+from .config import container_args, volume_name
 from .dockerops import UID, capture, container_healthy, container_logs, inspect, sh
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -154,6 +153,7 @@ def sca_iac(run: "Run"):
 
 
 def _buildx(run: "Run", log: Path, *args: str, timeout: int) -> int:
+    """`docker buildx build` of the contract's Dockerfile inside the CI slice."""
     c = run.contract
     return sh(["docker", "buildx", "build", "--progress=plain", "--cgroup-parent", run.s.ci_slice,
                "-f", str(run.src / c.context / c.dockerfile), "--build-arg", f"GIT_SHA={run.sha}",
@@ -373,20 +373,34 @@ def staging_certs(run: "Run", aliases: list[str]) -> Path | None:
     return out
 
 
-def _mount_dirs(c: Contract, root: Path) -> Path:
-    for m in c.mounts:
-        d = root / m.name
-        if not d.exists():
-            d.mkdir(parents=True, mode=0o700)
-            os.chmod(d, 0o700)
-    return root
+def _staging_volumes(run: "Run", log: Path) -> tuple[list[str], str | None]:
+    """Create the run's throwaway volume for each mount, labelled so crash cleanup removes it too.
+
+    Like production, Docker fills a new volume from the image's folder at the target, owner included,
+    so an app running as its own user can write to it.
+    """
+    made: list[str] = []
+    for m in run.contract.mounts:
+        name = volume_name(run.contract, m, run.id)
+        if sh(["docker", "volume", "create", *run.docker.labels, name], log, 60) != 0:
+            return made, f"cannot create the staging volume for mount '{m.name}'"
+        made.append(name)
+    return made, None
+
+
+def _labelled_build(run: "Run", log: Path, target: str, tag: str) -> int:
+    """Build a Dockerfile stage as a run-labelled image, so crash cleanup removes it too."""
+    return _buildx(run, log, "--target", target, "-t", tag, "--load", *run.docker.labels,
+                   timeout=run.s.limit("build", 1800))
 
 
 def dast_staging(run: "Run"):
     """develop: run the new image in an isolated, internet-less network and attack it (active scan).
 
-    The app runs with GMSHIELD_MODE=test, beside its throwaway services and companions, with the same
-    caps and hardening as production but inside the CI slice.
+    The app runs with GMSHIELD_MODE=test, beside its throwaway services, with the same caps and hardening
+    as production but inside the CI slice; its mounts are throwaway volumes of this run. Companions are
+    stand-ins (for example a stand-in backend), run with GMSHIELD_MODE=test but without the contract's
+    caps and hardening, which describe the app under test only.
     """
     c = run.contract
     if not c.http:
@@ -400,20 +414,23 @@ def dast_staging(run: "Run"):
     app = _cname(run, "app")
     containers: list[str] = []
     images: list[str] = []
+    volumes: list[str] = []
     files = ["dast/staging.log"]
     try:
         if not _network(run, net, log):
             return _error("cannot create the staging network", files)
+        volumes, err = _staging_volumes(run, log)
+        if err:
+            return _error(err, files)
         containers, err = start_services(run, net, c.staging_services, "staging", outdir, log)
         if err:
             return _error(f"staging service {err}", files + [f"dast/{s}.log" for s in c.staging_services
                                                               if (outdir / f"{s}.log").exists()])
         for comp in c.companions:
             tag = f"gmshield-ci/{c.service}-{comp.target}:{run.sha}"
-            if _buildx(run, log, "--target", comp.target, "-t", tag, "--load",
-                       timeout=run.s.limit("build", 1800)) != 0:
-                return _error(f"companion '{comp.target}' failed to build", files)
             images.append(tag)
+            if _labelled_build(run, log, comp.target, tag) != 0:
+                return _error(f"companion '{comp.target}' failed to build", files)
             rc = run.docker.run(f"companion-{comp.alias}", tag, [], log=log, timeout=120, network=net,
                                 env={"GMSHIELD_MODE": "test"}, user=None, detach=True,
                                 extra=["--network-alias", comp.alias])
@@ -426,8 +443,7 @@ def dast_staging(run: "Run"):
             if certs is None:
                 return _error("could not create the throwaway certificates", files)
         argv = container_args(c, run.s, "staging", name=app, image=run.local_image, network=net,
-                              labels=run.docker.labels, mounts_dir=_mount_dirs(c, run.work / "mounts"),
-                              certs_dir=certs)
+                              labels=run.docker.labels, run_id=run.id, certs_dir=certs)
         if sh(argv, log, 120) != 0:
             return _error("staging container failed to start", files)
         scheme = c.health_scheme
@@ -442,6 +458,8 @@ def dast_staging(run: "Run"):
         return result
     finally:
         _remove(app, *containers)
+        if volumes:
+            sh(["docker", "volume", "rm", "-f", *volumes], None, 120)
         sh(["docker", "network", "rm", net], None, 60)
         for tag in images:
             sh(["docker", "rmi", tag], None, 120)
@@ -461,12 +479,11 @@ def integration_tests(run: "Run"):
     log = outdir / "integration-tests.log"
     files = ["integration-tests/integration-tests.log"]
     tag = f"gmshield-ci/{c.service}-{c.integration_target}:{run.sha}"
-    if _buildx(run, log, "--target", c.integration_target, "-t", tag, "--load",
-               timeout=run.s.limit("build", 1800)) != 0:
-        return _error(f"stage '{c.integration_target}' failed to build", files)
     net = f"gmshield-ci-{run.id}-it"
     containers: list[str] = []
     try:
+        if _labelled_build(run, log, c.integration_target, tag) != 0:
+            return _error(f"stage '{c.integration_target}' failed to build", files)
         if not _network(run, net, log):
             return _error("cannot create the integration-test network", files)
         containers, err = start_services(run, net, c.test_services, "it", outdir, log)
@@ -521,18 +538,27 @@ def publish(run: "Run"):
     return "ok", {"image": run.prod_image, "digest": digest}, ["publish.log"], digest or run.prod_image
 
 
-def _start_prod(run: "Run", image_ref: str, log: Path) -> tuple[int, str]:
-    """Replace the production container. Returns (exit code, reason on failure)."""
+PREVIOUS_SUFFIX = "-previous"
+
+
+def _previous_name(run: "Run") -> str:
+    return run.prod_name + PREVIOUS_SUFFIX
+
+
+def _certs_dir(run: "Run") -> Path | None:
+    """The service's own certificates folder (tls.crt, tls.key, ca.crt), never another service's."""
+    return run.s.certs_dir / run.contract.service if run.contract.certs else None
+
+
+def _start_prod(run: "Run", log: Path) -> tuple[int, str]:
+    """Create and start the new production container. Returns (exit code, reason on failure)."""
     c = run.contract
     nets = c.prod_networks(run.s)
     sh(["docker", "rm", "-f", run.prod_name], log, 120)
     env_file = run.s.secrets_dir / f"{c.service}.env"   # server-only secrets, never in git
-    mounts = run.s.mounts_root / c.service
-    if c.mounts:
-        _mount_dirs(c, mounts)
-    argv = container_args(c, run.s, "production", name=run.prod_name, image=image_ref, network=nets[0],
-                          env_file=env_file if env_file.is_file() else None, mounts_dir=mounts,
-                          certs_dir=run.s.certs_dir if c.certs else None, create=len(nets) > 1)
+    argv = container_args(c, run.s, "production", name=run.prod_name, image=run.prod_image, network=nets[0],
+                          env_file=env_file if env_file.is_file() else None, certs_dir=_certs_dir(run),
+                          create=len(nets) > 1)
     rc = sh(argv, log, 300)
     if rc != 0 or len(nets) == 1:
         return rc, "" if rc == 0 else f"docker exit {rc}"
@@ -545,7 +571,8 @@ def _start_prod(run: "Run", image_ref: str, log: Path) -> tuple[int, str]:
 
 
 def _ca_cert(run: "Run") -> Path | None:
-    return run.s.certs_dir / "ca.crt" if run.contract.health_scheme == "https" else None
+    certs = _certs_dir(run)
+    return certs / "ca.crt" if certs is not None and run.contract.health_scheme == "https" else None
 
 
 def _healthy(run: "Run", log: Path) -> bool:
@@ -560,6 +587,33 @@ def _missing_networks(nets: list[str]) -> list[str]:
     return [n for n in nets if capture(["docker", "network", "inspect", n])[0] != 0]
 
 
+def _set_previous_aside(run: "Run", log: Path) -> str | None:
+    """Stop the current container and keep it, unchanged, as gmshield-<service>-previous.
+
+    Returns an error when it cannot be set aside (it is then left running under its own name).
+    """
+    prev = _previous_name(run)
+    run.previous_kept = run.previous_running = False
+    run.previous_image = inspect(run.prod_name, "{{.Config.Image}}")
+    if run.previous_image is None:
+        # Only a container left aside by an interrupted deploy: it is the version to return to.
+        run.previous_image = inspect(prev, "{{.Config.Image}}")
+        run.previous_kept = run.previous_image is not None
+        run.previous_running = run.previous_kept
+        return None
+    sh(["docker", "rm", "-f", prev], log, 120)                  # a stale copy from an earlier deploy
+    run.previous_running = inspect(run.prod_name, "{{.State.Running}}") == "true"
+    if sh(["docker", "stop", run.prod_name], log, 120) != 0:
+        sh(["docker", "start", run.prod_name], log, 120)
+        return "cannot stop the current container"
+    if sh(["docker", "rename", run.prod_name, prev], log, 60) != 0:
+        if run.previous_running:
+            sh(["docker", "start", run.prod_name], log, 120)
+        return "cannot rename the current container"
+    run.previous_kept = True
+    return None
+
+
 def deploy(run: "Run"):
     if not run.image_built:
         return _skip("no image")
@@ -569,11 +623,16 @@ def deploy(run: "Run"):
     missing = _missing_networks(c.prod_networks(run.s))
     if missing:
         return _error(f"network {', '.join(missing)} does not exist; production unchanged", [])
+    certs = _certs_dir(run)
+    if certs is not None and not certs.is_dir():
+        return _error(f"{certs} missing (needed by certs = true); production unchanged", [])
     ca = _ca_cert(run)
     if ca is not None and not ca.is_file():
         return _error(f"{ca} missing (needed by health_scheme = \"https\"); production unchanged", [])
-    run.previous_image = inspect(run.prod_name, "{{.Config.Image}}")
-    rc, why = _start_prod(run, run.prod_image, log)
+    err = _set_previous_aside(run, log)
+    if err:
+        return _error(f"{err}; production unchanged", ["deploy.log"])
+    rc, why = _start_prod(run, log)
     if rc == 0 and _healthy(run, log):
         run.deployed = True
         return "ok", {"container": run.prod_name, "image": run.prod_image,
@@ -584,13 +643,25 @@ def deploy(run: "Run"):
 
 
 def rollback(run: "Run", log: Path) -> str:
-    if run.previous_image:
-        rc, _ = _start_prod(run, run.previous_image, log)
-        run.rolled_back = rc == 0
-        return f"rolled back to {run.previous_image}" if rc == 0 else "ROLLBACK FAILED"
+    """Remove the new container and bring back the previous one exactly as it was (same container,
+    same settings), renamed back and started if it was running."""
     sh(["docker", "rm", "-f", run.prod_name], log, 120)
-    run.rolled_back = True
-    return "no previous version; container removed"
+    if not run.previous_kept:
+        run.rolled_back = True
+        return "no previous version; container removed"
+    ok = sh(["docker", "rename", _previous_name(run), run.prod_name], log, 60) == 0
+    if ok and run.previous_running:
+        ok = sh(["docker", "start", run.prod_name], log, 120) == 0
+    run.rolled_back = ok
+    run.previous_kept = not ok
+    return f"rolled back to {run.previous_image}" if ok else "ROLLBACK FAILED"
+
+
+def discard_previous(run: "Run") -> None:
+    """The release stands: the previous container is no longer needed."""
+    if run.previous_kept:
+        sh(["docker", "rm", "-f", _previous_name(run)], run.dir / "deploy.log", 120)
+        run.previous_kept = False
 
 
 def mark_prod(run: "Run"):

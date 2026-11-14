@@ -51,6 +51,7 @@ class Run:
         self.log_opts = sha
         self.image_built = self.deployed = self.rolled_back = False
         self.previous_image: str | None = None
+        self.previous_kept = self.previous_running = False   # gmshield-<service>-previous, kept for rollback
         self.promotions: dict = {}
         self.result = "running"
         self.notes: list[str] = []
@@ -194,6 +195,8 @@ def main_flow(run: Run) -> None:
             if dast.status == "failed" and run.s.gates.get("dast_main", {}).get("rollback_on_fail", True):
                 msg = stages.rollback(run, run.dir / "deploy.log")
                 run.notes.append(f"Post-deploy DAST failed: {msg}.")
+            else:
+                stages.discard_previous(run)    # the new version stands; the kept previous one goes
     elif run.contract.self_update and _passed(run):
         stages.execute(run, "deploy", "Deploy (pipeline self-update)", None, _self_update)
     run.result = "passed" if _passed(run) else "failed"
