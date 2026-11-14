@@ -56,6 +56,12 @@ only_fixable = true
 max_high = 0
 max_medium = 5
 
+[nfr1]                  # NFR-1 (Story 1.7), develop: in the staging session, a random known text is stored
+                        # through the contract's [nfr1] routes and read back, then pg_dump, a Redis RDB, each
+                        # mounted volume and every log are searched for it (plain, Base64, Base64url, hex).
+                        # Found anywhere, not seeded or not read back: blocked. No threshold to tune.
+                        # Repositories without [nfr1] skip it.
+
 [dast_main]             # ZAP passive baseline scan of production after deploy
 max_high = 0
 max_medium = 10

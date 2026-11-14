@@ -18,6 +18,9 @@ push to develop ──► Resolve flow
                     ► Integration tests      (optional [test].target stage beside throwaway services)
                     ► DAST, active           (OWASP ZAP against a throwaway copy in an isolated network,
                                               GMSHIELD_MODE=test, beside its throwaway services)
+                    ► NFR-1 at rest          (same session, before teardown: a random known text stored
+                                              through [nfr1], read back, then searched for in pg_dump,
+                                              a Redis RDB, each mounted volume and every log)
                     ► Quality gate ──pass──► code is promotable (recorded by its git tree)
                                              + GitHub status gmshield-ci/develop = success
 
@@ -41,7 +44,8 @@ repository, "deploy" on `main` means the runner updates itself (after the new co
 Defined in [`gates.toml`](gates.toml). Defaults: no leaked secrets; no high-severity Semgrep findings
 (medium <= 25); SonarQube quality gate OK; no fixable critical or high CVEs in dependencies or the
 image; no critical or high Dockerfile misconfigurations; DAST high = 0 (medium <= 5 on develop,
-<= 10 in production); failing unit tests always block. A scanner that crashes or times out blocks
+<= 10 in production); NFR-1: the run's known text is seeded, read back, and found in no store or
+log (repositories without `[nfr1]` skip it); failing unit tests always block. A scanner that crashes or times out blocks
 the commit (fail closed). Reviewed false positives are suppressed in the app repo
 (`.gitleaksignore`, `nosemgrep`, `.trivyignore`, `.gmshield/zap-ignore.txt`, or "Safe" in SonarQube),
 never by loosening the gates.
@@ -119,6 +123,7 @@ these options existed. The template documents each option and its default; in sh
 | `[staging]` | `env` | Added over `[deploy].env` in staging only |
 | | `services` | `postgres` and/or `redis`, started on the run's internal network under those names and ready (`pg_isready`, `redis-cli ping`) before the app starts |
 | | `companions` | `[[staging.companions]] target, alias`: that Dockerfile stage (it must exist) is built and run beside the app as a stand-in, with `GMSHIELD_MODE=test` but without the contract's limits and hardening |
+| `[nfr1]` | `seed_path`, `readback_path` | NFR-1 gate (Story 1.7), develop, inside the staging session after ZAP and before teardown. The pipeline makes a random ASCII text, `POST`s `{"text": ...}` to `seed_path` (answer: `{"id": ...}`), `GET`s `readback_path` with `{id}` replaced (answer: a JSON object whose every value is the text), then copies the stores (`pg_dump`, `redis-cli --rdb` with RDB compression off, `docker cp` of each `[deploy].mounts` target) and the logs (app, services, companions) into the run's work folder and searches them for the text in plain UTF-8, Base64 and Base64url (every alignment) and hex. Found anywhere, not seeded or not read back: the gate fails and names the store. A store that cannot be copied is an error. `nfr1/nfr1.json` lists every store searched with its size (never the text). Needs `[service].port`. Without the table: skipped. |
 | `[test]` | `target`, `services` | Integration tests on develop (full run, after the image): the stage (it must exist) runs on an internal network beside its services, exit 0 passes, limit `limits.integration_tests` (1800 s). No target: skipped. |
 
 Env keys (`[deploy].env`, `[staging].env`) must be variable names (`[A-Za-z_][A-Za-z0-9_]*`).
@@ -299,7 +304,9 @@ host port.
 
 **Credentials (AD-23).** `bash deploy/data-credentials.sh` writes each secret once (32 random bytes,
 mode 600, never printed; a rerun says `already done`): the stack's own in `~/stack/.env`, the clients'
-in `~/gmshield-ci/secrets/<service>.env`, and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+in `~/gmshield-ci/secrets/<service>.env` (the backend's include `GMSHIELD_VAULT_MASTER_KEY` and
+`GMSHIELD_VAULT_INDEX_KEY`, Base64, Story 1.7: an existing vault key is never replaced, since data
+encrypted under it would be lost; no off-server copy exists until Epic 10), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
 hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
 the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
 rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING

@@ -186,6 +186,15 @@ def judge(kind: str, outcome: str, metrics: dict, gates: dict) -> tuple[str, str
         threshold = f"critical <= {g.get('max_critical', 0)}, high <= {g.get('max_high', 0)}"
         reasons += _over("critical", m["CRITICAL"], g.get("max_critical", 0))
         reasons += _over("high", m["HIGH"], g.get("max_high", 0))
+    elif kind == "nfr1":
+        threshold = "known text seeded, read back, and found in no store or log"
+        if not metrics.get("seeded"):
+            reasons.append(f"seeding failed: {metrics.get('seed_problem') or 'no id'}")
+        elif not metrics.get("read_back"):
+            reasons.append(metrics.get("seed_problem") or "the read-back did not return the text")
+        if not metrics.get("stores"):
+            reasons.append("no store or log was searched")
+        reasons += [f"known text found in {where}" for where in metrics.get("found_in") or []]
     elif kind in ("dast_develop", "dast_main"):
         threshold = f"high <= {g.get('max_high', 0)}, medium <= {g.get('max_medium', 5)}"
         reasons += _over("high alerts", metrics["high"], g.get("max_high", 0))
