@@ -19,7 +19,7 @@ RUN_ID = "20261113-120000-01234567"
 def settings(home: Path = Path("/srv/ci"), **limits) -> config.Settings:
     return config.Settings(
         home=home, org="GMshield", branches=("develop", "main"), registry="localhost:5000",
-        prod_network="rpg_default", ci_slice="ci.slice", repos=[],
+        prod_network="gmshield-app", ci_slice="ci.slice", repos=[],
         images={"zap": "zap@sha256:1", "postgres": "postgres@sha256:2", "redis": "redis@sha256:3",
                 "jdk27": "jdk@sha256:4", "sonar_scanner": "scanner@sha256:5"},
         semgrep_rulesets=[], limits=limits, gates={})
@@ -54,7 +54,7 @@ def staging_args(c, s=None, **kw):
 
 def old_prod(service, port, host_port, env=(), env_file=None):
     """Production arguments exactly as the pipeline built them before the contract grew."""
-    cmd = ["docker", "run", "-d", "--name", f"gmshield-{service}", "--network", "rpg_default",
+    cmd = ["docker", "run", "-d", "--name", f"gmshield-{service}", "--network", "gmshield-app",
            "--restart", "unless-stopped", "--label", f"gmshield.service={service}", "--label", f"gmshield.sha={SHA}"]
     if port and host_port:
         cmd += ["-p", f"127.0.0.1:{host_port}:{port}"]
@@ -129,7 +129,7 @@ class GoldenArgsTest(unittest.TestCase):
                           c.read_only, c.user, c.cap_drop, c.staging_env, c.staging_services, c.companions,
                           c.integration_target, c.test_services),
                          ("http", "", "", "", [], [], [], False, False, "", [], {}, [], [], "", []))
-        self.assertEqual(c.prod_networks(settings()), ["rpg_default"])
+        self.assertEqual(c.prod_networks(settings()), ["gmshield-app"])
 
 
 # ------------------------------------------------------------------ one test per option
@@ -478,6 +478,9 @@ class RuntimeTest(unittest.TestCase):
 
     def fake_capture(self, cmd, timeout=120):
         self.cmds.append(cmd)
+        if "check" in cmd and str(stages.CERTS_SCRIPT) in cmd:           # the real certificate check
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            return p.returncode, p.stdout.strip()
         if cmd[:3] == ["docker", "network", "inspect"]:
             return self.capture_rc.get(f"inspect {cmd[3]}", 0), ""
         if cmd[:2] == ["docker", "exec"]:
@@ -520,7 +523,8 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(outcome, "ok", detail)
         inspects = [c[3] for c in self.cmds if c[:3] == ["docker", "network", "inspect"]]
         self.assertEqual(inspects, ["gmshield-app", "gmshield-data"])
-        self.assertEqual(self.cmds.index(["docker", "network", "inspect", "gmshield-data"]), 1)   # checked first
+        docker = [c for c in self.cmds if c[:1] == ["docker"]]
+        self.assertEqual(docker.index(["docker", "network", "inspect", "gmshield-data"]), 1)   # checked first
         verbs = [c[:2] + ([c[2]] if c[1] == "network" else []) for c in self.prod_cmds()]
         self.assertEqual(verbs, [["docker", "stop"], ["docker", "rename"], ["docker", "rm"],
                                  ["docker", "create"], ["docker", "network", "connect"], ["docker", "start"]])
@@ -654,6 +658,37 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(self.docker_cmds("create") + self.docker_cmds("run"), [])
         self.assertEqual(self.docker_cmds("start"), [["docker", "start", "gmshield-api"]])
 
+    def test_deploy_warns_about_a_certificate_close_to_expiry_and_proceeds(self):
+        home = self.tmp / "home"
+        env = {"GMSHIELD_HOME": str(home), "PATH": "/usr/bin:/bin"}
+        res = subprocess.run(["bash", str(stages.CERTS_SCRIPT), "issue"], capture_output=True, text=True, env=env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        leaf = home / "certs" / "redis"
+        csr, ext = self.tmp / "csr", self.tmp / "ext"
+        ext.write_text("subjectAltName=DNS:redis\n")
+        for cmd in (["openssl", "req", "-new", "-key", str(leaf / "tls.key"), "-subj", "/CN=redis", "-out", str(csr)],
+                    ["openssl", "x509", "-req", "-in", str(csr), "-CA", str(home / "ca" / "ca.crt"), "-CAkey",
+                     str(home / "ca" / "ca.key"), "-set_serial", "9", "-days", "20", "-extfile", str(ext),
+                     "-out", str(leaf / "tls.crt")]):
+            self.assertEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
+        run = self.run_for('[service]\nport = 80\n')
+        outcome, metrics, _, _ = stages.deploy(run)
+        self.assertEqual(outcome, "ok")
+        self.assertEqual(len(metrics["warnings"]), 1)
+        self.assertIn(f"{leaf / 'tls.crt'} expires on", metrics["warnings"][0])
+        rec = stages.execute(types.SimpleNamespace(log=lambda m: None, lock=__import__("threading").Lock(),
+                                                   records=[], titles={}, s=run.s),
+                             "deploy", "Deploy (prd)", None, lambda r: (outcome, metrics, [], "ok"))[0]
+        self.assertEqual(rec.status, "passed")
+        self.assertEqual(rec.warnings, metrics["warnings"])
+
+    def test_deploy_without_the_authority_runs_no_certificate_check(self):
+        run = self.run_for('[service]\nport = 80\n')
+        outcome, metrics, _, _ = stages.deploy(run)
+        self.assertEqual(outcome, "ok")
+        self.assertNotIn("warnings", metrics)
+        self.assertFalse([c for c in self.cmds if str(stages.CERTS_SCRIPT) in c])
+
     def test_discard_previous(self):
         run = self.run_for('[service]\nport = 80\n')
         self.assertEqual(stages.deploy(run)[0], "ok")
@@ -686,7 +721,7 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(stages.deploy(run)[0], "ok")
         self.assertEqual(self.docker_cmds("run")[0][:3], ["docker", "run", "-d"])
         self.assertEqual(self.docker_cmds("start"), [])
-        self.assertEqual(run.docker.calls[-1][3]["network"], "rpg_default")
+        self.assertEqual(run.docker.calls[-1][3]["network"], "gmshield-app")
 
     def test_post_deploy_dast_uses_first_network(self):
         run = self.run_for('[service]\nport = 80\n[deploy]\nnetworks = ["gmshield-app", "gmshield-data"]\n')

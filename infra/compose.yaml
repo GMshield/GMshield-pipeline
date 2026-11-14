@@ -1,0 +1,164 @@
+# The data stack of GMshield on roberto-server (AD-14, AD-23, AD-29; Story 1.6).
+# Deploy: bash deploy/stack.sh up (copies this folder to ~/stack and starts it); never edit ~/stack.
+# Before the first deploy: bash deploy/certs.sh issue && bash deploy/data-credentials.sh
+#
+# - Six networks with fixed names and subnets. Every one is internal except gmshield-outbound, the
+#   only one that routes to the internet. Membership (the apps join through their pipeline contracts):
+#     frontend  edge, app           backend  app, data, work, outbound
+#     worker    work, model, outbound
+#     postgres  data                redis, qdrant  work
+#   Ollama runs on the host and listens on the gmshield-model gateway (172.30.5.1) only
+#   (deploy/secure-ollama.sh); ufw lets the model subnet alone reach it.
+# - The registry keeps 127.0.0.1:5000 (the pipeline pushes from the host) on a network of its own.
+# - Postgres, Redis and Qdrant serve certificates of the private authority (deploy/certs.sh) and
+#   require credentials (deploy/data-credentials.sh): no data service publishes a host port.
+# - Every image is pinned by version and digest, released at least two weeks before 2026-11-14.
+# - Container names stay postgres, redis, qdrant and registry (deploy/encrypt-volume.sh checks them).
+# - All containers run inside containers.slice (Docker's cgroup-parent), capped per service below.
+name: rpg
+
+services:
+  postgres:            # the backend's database; role gmshield_backend over hostssl + SCRAM only
+    image: postgres:18.6-alpine@sha256:9ba53c7d41ea093baf5c1ba635ba5434c4f979880527d49bb7d9237d3193085b
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rpg                     # superuser: the container's local socket only (pg_hba.conf)
+      POSTGRES_DB: rpg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deploy/data-credentials.sh}
+    entrypoint: ["/bin/sh", "/gmshield/start.sh"]
+    networks: [data]
+    volumes:
+      - pg_data:/var/lib/postgresql
+      - ./postgres:/gmshield:ro
+      - ${GMSHIELD_CERTS:-~/gmshield-ci/certs}/postgres:/certs:ro
+    tmpfs: ["/run/gmshield-postgres:size=1m"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 768m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rpg -d rpg"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
+
+  redis:               # jobs and sessions; TLS only, accounts in users.acl (default user off)
+    image: redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
+    container_name: redis
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/gmshield/start.sh"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PROBE_PASSWORD:?run deploy/data-credentials.sh}   # the health check's account (PING only)
+    networks: [work]
+    volumes:
+      - redis_data:/data
+      - ./redis/start.sh:/gmshield/start.sh:ro
+      - ./redis-users.acl:/gmshield/users.acl:ro
+      - ${GMSHIELD_CERTS:-~/gmshield-ci/certs}/redis:/certs:ro
+    tmpfs: ["/run/gmshield-redis:size=1m"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --tls --cacert /certs/ca.crt -h localhost --user probe --no-auth-warning ping | grep -q PONG"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+      start_interval: 2s
+
+  qdrant:              # vectors for retrieval; TLS, one API key (held by the worker)
+    image: qdrant/qdrant:v1.15.4@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1
+    container_name: qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?run deploy/data-credentials.sh}
+      QDRANT__SERVICE__ENABLE_TLS: "true"    # REST (6333) and gRPC (6334)
+      QDRANT__SERVICE__VERIFY_HTTPS_CLIENT_CERTIFICATE: "false"
+      QDRANT__TLS__CERT: /certs/tls.crt
+      QDRANT__TLS__KEY: /certs/tls.key
+      QDRANT__TLS__CA_CERT: /certs/ca.crt
+      QDRANT__TELEMETRY_DISABLED: "true"
+    networks: [work]
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - ${GMSHIELD_CERTS:-~/gmshield-ci/certs}/qdrant:/certs:ro
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1g
+    cpus: 0.75
+    healthcheck:       # the image has no HTTP client: the REST port accepting connections is enough
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 2s
+
+  registry:            # production image registry, written to only by the CI/CD pipeline
+    image: registry:3.1.2@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c
+    container_name: registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"   # allows pruning old images later
+    ports: ["127.0.0.1:5000:5000"]
+    networks: [registry]
+    volumes: ["registry_data:/var/lib/registry"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+
+  networks:            # creates the networks no data service joins (Compose creates only the ones in use);
+                       # it runs `true` and exits at each `up`, so it holds nothing and reaches nothing
+    image: redis:8.10.3-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3
+    container_name: gmshield-networks
+    restart: "no"
+    entrypoint: ["true"]
+    networks: [edge, app, model, outbound]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 16m
+    cpus: 0.1
+
+networks:
+  edge:                # frontend; later the tunnel (launch)
+    name: gmshield-edge
+    internal: true
+    driver_opts: {com.docker.network.bridge.name: gmshield-edge}
+    ipam: {config: [{subnet: 172.30.1.0/24, gateway: 172.30.1.1}]}
+  app:                 # frontend -> backend (HTTP)
+    name: gmshield-app
+    internal: true
+    driver_opts: {com.docker.network.bridge.name: gmshield-app}
+    ipam: {config: [{subnet: 172.30.2.0/24, gateway: 172.30.2.1}]}
+  data:                # backend -> postgres
+    name: gmshield-data
+    internal: true
+    driver_opts: {com.docker.network.bridge.name: gmshield-data}
+    ipam: {config: [{subnet: 172.30.3.0/24, gateway: 172.30.3.1}]}
+  work:                # backend, worker -> redis, qdrant; worker -> backend
+    name: gmshield-work
+    internal: true
+    driver_opts: {com.docker.network.bridge.name: gmshield-work}
+    ipam: {config: [{subnet: 172.30.4.0/24, gateway: 172.30.4.1}]}
+  model:               # worker -> Ollama on the host, at the gateway 172.30.5.1:11434
+    name: gmshield-model
+    internal: true
+    driver_opts: {com.docker.network.bridge.name: gmshield-model}
+    ipam: {config: [{subnet: 172.30.5.0/24, gateway: 172.30.5.1}]}
+  outbound:            # the only route to the internet (backend, worker)
+    name: gmshield-outbound
+    driver_opts: {com.docker.network.bridge.name: gmshield-out}
+    ipam: {config: [{subnet: 172.30.6.0/24, gateway: 172.30.6.1}]}
+  registry:            # the registry alone, for its 127.0.0.1:5000 port
+    name: gmshield-registry
+    driver_opts: {com.docker.network.bridge.name: gmshield-reg}
+    ipam: {config: [{subnet: 172.30.7.0/24, gateway: 172.30.7.1}]}
+
+volumes:
+  registry_data: {}
+  pg_data: {}
+  redis_data: {}
+  qdrant_data:
+    external: true     # created earlier by `docker run`; kept so no data is lost

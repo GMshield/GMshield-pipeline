@@ -68,6 +68,17 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual([r[2]["run"] for r in snap.recent],
                          ["20261110-110500-cccc", "20261110-110000-bbbb", "20261110-100000-aaaa"])
 
+    def test_warnings_of_the_latest_run_are_shown(self):
+        _run(self.home, "GMshield-backend", "main", "20261114-100000-aaaa", "passed", "2026-11-14T10:00:00+00:00",
+             stages=[{"key": "deploy", "title": "Deploy (prd)", "status": "passed", "reasons": [],
+                      "warnings": ["/c/certs/redis/tls.crt expires on Dec  4 2026 (within 30 days)"]}])
+        snap = dashboard.collect(self.s, timer=False)
+        self.assertEqual(snap.latest[("GMshield-backend", "main")]["warned"],
+                         ["Deploy (prd): /c/certs/redis/tls.crt expires on Dec  4 2026 (within 30 days)"])
+        text = self.frame(snap, cols=160)
+        self.assertIn(" Warnings", text)
+        self.assertIn("! backend: Deploy (prd): /c/certs/redis/tls.crt expires on", text)
+
     def test_newest_release(self):
         _run(self.home, "GMshield-backend", "main", "20261109-100000-aaaa", "passed", "2026-11-09T10:00:00+00:00",
              release="r2026.11.09-1000-aaaa")

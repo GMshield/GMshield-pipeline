@@ -20,7 +20,7 @@ cat > "$T/repos.toml" <<EOF
 org = "local-e2e"
 branches = ["develop", "main"]
 registry = "localhost:5000"
-prod_network = "rpg_default"
+prod_network = "bridge"            # the sample publishes 127.0.0.1:18080: not an internal network
 ci_slice = "ci.slice"
 [[repo]]
 name = "GMshield-sample"

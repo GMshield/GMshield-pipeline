@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import gates
-from .config import container_args, volume_name
+from .config import RUNNER_DIR, container_args, volume_name
 from .dockerops import UID, capture, container_healthy, container_logs, inspect, sh
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -618,9 +618,32 @@ def _set_previous_aside(run: "Run", log: Path) -> str | None:
     return None
 
 
+CERTS_SCRIPT = RUNNER_DIR / "deploy" / "certs.sh"
+
+
+def cert_warnings(s) -> list[str]:
+    """`deploy/certs.sh check` (Story 1.6): one warning per certificate of the private authority that
+    expires within 30 days. Run only where the authority is installed; it never blocks a deploy."""
+    if not (s.home / "ca").is_dir() and not s.certs_dir.is_dir():
+        return []
+    rc, out = capture(["env", f"GMSHIELD_HOME={s.home}", "bash", str(CERTS_SCRIPT), "check"], timeout=60)
+    warnings = [l.removeprefix("WARNING: ") for l in out.splitlines() if l.startswith("WARNING: ")]
+    if rc != 0:
+        warnings.append(f"the certificate check failed (exit {rc})")
+    return warnings
+
+
 def deploy(run: "Run"):
     if not run.image_built:
         return _skip("no image")
+    warnings = cert_warnings(run.s)
+    outcome, metrics, files, detail = _deploy(run)
+    if warnings:
+        metrics = {**metrics, "warnings": [*(metrics.get("warnings") or []), *warnings]}
+    return outcome, metrics, files, detail
+
+
+def _deploy(run: "Run"):
     c = run.contract
     log = run.dir / "deploy.log"
     # Checked before anything changes: production keeps running when the contract cannot be met.

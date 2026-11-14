@@ -27,7 +27,8 @@ path = "/"                  # where ZAP starts crawling (same characters as heal
 openapi = ""                # e.g. "/v3/api-docs": ZAP API scan instead of crawling (develop)
 
 [deploy]
-host_port = 0               # publish on 127.0.0.1:<host_port> in production (0-65535); 0 = not published
+host_port = 0               # publish on 127.0.0.1:<host_port> in production (0-65535); 0 = not published.
+                            # GMshield's apps publish none (Story 1.6); it needs a non-internal first network.
 env = {}                    # non-secret settings, e.g. { SPRING_PROFILES_ACTIVE = "prod" }; keys are
                             # variable names ([A-Za-z_][A-Za-z0-9_]*)
                             # secrets: ~/gmshield-ci/secrets/<service>.env on roberto-server
@@ -38,7 +39,9 @@ memory = ""                 # e.g. "768m" or "2g" (docker --memory), at least "6
 cpus = ""                   # e.g. 1.5 (docker --cpus), from 0.01 to 64; "" = no limit
 slice = ""                  # production cgroup slice: "containers.slice" or "ai.slice"; "" = Docker's default
 networks = []               # production networks, e.g. ["gmshield-app", "gmshield-data"]; [] = the
-                            # pipeline's prod network. Created on the first, then connected to the others;
+                            # pipeline's prod network (gmshield-app). The six networks come from
+                            # infra/compose.yaml: gmshield-edge, -app, -data, -work, -model are internal,
+                            # gmshield-outbound alone reaches the internet. Created on the first, then connected to the others;
                             # probes and ZAP join the first one only. A missing network fails the deploy
                             # before production is touched. "host" and "none" are refused.
 # Hardening. Any of read_only, user, cap_drop also adds --security-opt no-new-privileges.

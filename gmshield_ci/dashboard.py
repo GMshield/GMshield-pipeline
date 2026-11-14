@@ -53,7 +53,7 @@ class Running:
 
 @dataclass
 class Snapshot:
-    latest: dict = field(default_factory=dict)      # (repo, branch) -> history row + "stages" + "blockers"
+    latest: dict = field(default_factory=dict)      # (repo, branch) -> history row + "stages" + "blockers" + "warned"
     recent: list = field(default_factory=list)      # (repo, branch, row), newest first
     release: tuple | None = None                    # (repo, row) of the newest release
     running: Running | None = None
@@ -88,20 +88,25 @@ def _parse_time(value: str | None) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def stage_results(run_dir: Path) -> tuple[dict[str, str], list[str]]:
-    """({stage key: status}, ['Stage title: first reason' for each failed stage]) from a run's summary.json."""
+def stage_results(run_dir: Path) -> tuple[dict[str, str], list[str], list[str]]:
+    """({stage key: status}, ['Stage title: first reason' for each failed stage],
+    ['Stage title: warning' for each warning]) from a run's summary.json."""
     try:
         data = json.loads((run_dir / "summary.json").read_text())
     except (OSError, json.JSONDecodeError):
-        return {}, []
-    statuses, failed = {}, []
+        return {}, [], []
+    statuses, failed, warned = {}, [], []
     for st in data.get("stages", []):
         key, status = str(st.get("key", "")), str(st.get("status", ""))
         statuses[key] = status
         if status == "failed":
             reasons = st.get("reasons") or []
             failed.append(f"{st.get('title', key)}" + (f": {reasons[0]}" if reasons else ""))
-    return statuses, failed
+        for w in st.get("warnings") or []:
+            item = f"{st.get('title', key)}: {w}"
+            if item not in warned:
+                warned.append(item)
+    return statuses, failed, warned
 
 
 def lock_held(lock: Path, proc_locks: Path = Path("/proc/locks")) -> bool:
@@ -176,7 +181,7 @@ def collect(s: Settings, timer: bool = True) -> Snapshot:
                 continue
             full = [r for r in rows if r.get("mode") == "full"] or rows
             last = dict(full[-1])
-            last["stages"], last["blockers"] = stage_results(hist.parent / last["run"])
+            last["stages"], last["blockers"], last["warned"] = stage_results(hist.parent / last["run"])
             snap.latest[(repo.name, branch)] = last
             snap.recent += [(repo.name, branch, r) for r in rows]
             for r in rows:
@@ -305,6 +310,11 @@ def _section(branch: str, snap: Snapshot, repos: list[str], width: int, height: 
     if blocked:
         lines.append([(" Blocked by", "bold")])
         lines += [[(f" ✗ {_short(repo)}: ", "red"), (b, None)] for repo, b in blocked]
+        lines.append([])
+    warned = [(repo, w) for repo, _ in keys for w in snap.latest.get((repo, branch), {}).get("warned", [])]
+    if warned:
+        lines.append([(" Warnings", "bold")])
+        lines += [[(f" ! {_short(repo)}: ", "yellow"), (w, None)] for repo, w in warned]
         lines.append([])
     if branch == "main":
         if snap.release:

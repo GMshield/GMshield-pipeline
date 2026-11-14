@@ -124,7 +124,9 @@ these options existed. The template documents each option and its default; in sh
 Env keys (`[deploy].env`, `[staging].env`) must be variable names (`[A-Za-z_][A-Za-z0-9_]*`).
 
 **Deploy and rollback.** Before production is touched, the pipeline checks every network and the
-certificates folder. It then stops the current container and renames it, unchanged,
+certificates folder, and runs `deploy/certs.sh check`: a certificate of the private authority that
+expires within 30 days becomes a warning of the deploy stage (in every report and on the dashboard);
+it never blocks the deploy. It then stops the current container and renames it, unchanged,
 `gmshield-<service>-previous`, and creates the new one. If the new container cannot be created,
 connected or started, is unhealthy, or fails the post-deploy DAST gate, it is removed and the previous
 container is renamed back and started exactly as it was (its own image, networks, mounts and
@@ -213,7 +215,7 @@ nothing else changes (not Docker, not Compose, not the pipeline's `install_id`):
 | `/var/lib/docker` (named volumes: Postgres, Redis, Qdrant, registry, SonarQube) | `docker` |
 | `/var/lib/containerd` (image layers) | `containerd` |
 | `~/gmshield-ci` (secrets, certificates, state, work, artifacts, cache, mirrors, runner) | `gmshield-ci` |
-| `~/stack` (data stack Compose file and `.env`) | `stack` |
+| `~/stack` (data stack: a copy of `infra/`, `.env`, `redis-users.acl`) | `stack` |
 | `~/.config/gmshield` (GitHub token) | `config-gmshield` |
 
 Swap is a 4 GiB logical volume (`ubuntu-vg/gmshield_swap`) encrypted with a new random key at each
@@ -274,13 +276,63 @@ sudo cryptsetup resize gmshield
 sudo resize2fs /dev/mapper/gmshield
 ```
 
+## Data stack and its networks (Story 1.6)
+
+The data stack (Postgres, Redis, Qdrant, the registry) is versioned here, in
+[`infra/compose.yaml`](infra/compose.yaml), and deployed by hand: `bash deploy/stack.sh up` copies
+`infra/` to `~/stack` (keeping `.env` and `redis-users.acl`), starts or updates it, waits until it is
+healthy and creates the backend's role and database when absent. Never edit `~/stack` by hand.
+
+| Network | Subnet | Internet | Members |
+|---|---|---|---|
+| `gmshield-edge` | 172.30.1.0/24 | no | frontend (later the tunnel) |
+| `gmshield-app` | 172.30.2.0/24 | no | frontend, backend |
+| `gmshield-data` | 172.30.3.0/24 | no | backend, postgres |
+| `gmshield-work` | 172.30.4.0/24 | no | backend, worker, redis, qdrant |
+| `gmshield-model` | 172.30.5.0/24 | no | worker; Ollama on the host at the gateway 172.30.5.1:11434 |
+| `gmshield-outbound` | 172.30.6.0/24 | yes | backend, worker |
+| `gmshield-registry` | 172.30.7.0/24 | yes | registry (127.0.0.1:5000) |
+
+Compose creates every network (a `gmshield-networks` container that only runs `true` holds the ones no
+data service joins); the apps join theirs through their contracts. No data service or app publishes a
+host port.
+
+**Credentials (AD-23).** `bash deploy/data-credentials.sh` writes each secret once (32 random bytes,
+mode 600, never printed; a rerun says `already done`): the stack's own in `~/stack/.env`, the clients'
+in `~/gmshield-ci/secrets/<service>.env`, and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
+the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
+rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING
+XREADGROUP XACK XAUTOCLAIM XCLAIM XPENDING` on the two work streams (the backend creates the group
+`workers`); `probe` (the health check) to `PING`. Qdrant: one API key, held by the worker.
+
+**Certificates.** `bash deploy/certs.sh issue` creates the private authority in `~/gmshield-ci/ca/`
+(mode 700, mounted nowhere) and a 365-day leaf for `postgres`, `redis` and `qdrant` in
+`~/gmshield-ci/certs/<service>/` (`tls.crt`, `tls.key`, `ca.crt`); `backend` and `worker` get `ca.crt`
+only. Clients verify the chain and the host name. `issue --renew` replaces the leaves (then `stack.sh
+up` again); `check` warns about anything expiring within 30 days and always exits 0.
+
+**Ollama (AD-29).** `sudo bash deploy/secure-ollama.sh plan|apply|status` (after `stack.sh up`, since
+it needs `gmshield-model`): removes `qwen3.5:4b`, lets only `172.30.5.0/24` reach `172.30.5.1:11434` in
+ufw (inserted above the existing deny) and removes the old `172.16.0.0/12` rule, adds the drop-in
+`zz-gmshield.conf` (listen on the gateway, after Docker, `OLLAMA_MAX_LOADED_MODELS=1`; `network.conf`
+moves to `/var/lib/gmshield/secure-ollama/`), points `/usr/local/bin/ai-healthcheck` at the new address
+and restarts Ollama. An SSH tunnel to Ollama must now target `172.30.5.1:11434`.
+
+First deploy, in order: `bash deploy/certs.sh issue`, `bash deploy/data-credentials.sh` (then add
+`GMSHIELD_ANTHROPIC_API_KEY` to `secrets/worker.env` by hand), `bash deploy/stack.sh up`,
+`sudo bash deploy/secure-ollama.sh apply`, `bash tests/stack_check.sh` (every row of the story's I/O
+matrix against the live stack; `tests/stack_trial.sh [backend image]` runs the same checks against a
+throwaway copy of the stack).
+
 ## Setup
 
 1. `sudo bash deploy/install-server.sh` (Docker buildx, `ci.slice`, the poller service and timer).
 2. Clone this repo to `~/gmshield-ci/runner`; copy `sonarqube/compose.yaml` to
    `~/gmshield-ci/sonarqube/` with a `.env` holding `SONAR_DB_PASSWORD`; run
    `python3 -m gmshield_ci sonar-setup`, then `python3 -m gmshield_ci selftest`.
-3. Tests: `python3 -m unittest -v` (gates, parsers and `encrypt-volume.sh` against stubs), `bash tests/e2e.sh` (full pipeline against a
+3. Tests: `python3 -m unittest -v` (gates, parsers, `encrypt-volume.sh` and `secure-ollama.sh` against
+   stubs, `certs.sh` and `data-credentials.sh` with the real openssl), `bash tests/e2e.sh` (full pipeline against a
    throwaway local repo, about 30 minutes).
 
 Pinned tool versions and digests: [`tools.toml`](tools.toml). Watched repositories: [`repos.toml`](repos.toml).
