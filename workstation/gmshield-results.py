@@ -42,7 +42,8 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")   # repo, branch and host 
 MARK = {"passed": "PASS", "failed": "FAIL", "skipped": "skip", "blocked": "BLOCKED"}
 TESTS = {  # test name -> pipeline stage keys (develop and main share names where they mean the same)
     "unit-tests": ["unit_tests"], "secrets": ["secrets"], "semgrep": ["sast"], "sca": ["sca_iac:sca"],
-    "iac": ["sca_iac:iac"], "sonarqube": ["sonar"], "image": ["image"], "dast": ["dast", "dast_prod"],
+    "iac": ["sca_iac:iac"], "sonarqube": ["sonar"], "image": ["image"],
+    "integration-tests": ["integration_tests"], "dast": ["dast", "dast_prod"],
     "promotion": ["promotion"], "publish": ["publish"], "deploy": ["deploy"], "release": ["release"],
 }
 VERDICT = {
