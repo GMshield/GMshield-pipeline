@@ -594,17 +594,21 @@ def _set_previous_aside(run: "Run", log: Path) -> str | None:
     """
     prev = _previous_name(run)
     run.previous_kept = run.previous_running = False
+    kept_image = inspect(prev, "{{.Config.Image}}")
+    if kept_image is not None:
+        # Left aside by an interrupted deploy: the last good version, so it stays the version to
+        # return to; a current container beside it was never verified and is removed.
+        sh(["docker", "rm", "-f", run.prod_name], log, 120)
+        run.previous_image = kept_image
+        run.previous_kept = run.previous_running = True
+        return None
     run.previous_image = inspect(run.prod_name, "{{.Config.Image}}")
     if run.previous_image is None:
-        # Only a container left aside by an interrupted deploy: it is the version to return to.
-        run.previous_image = inspect(prev, "{{.Config.Image}}")
-        run.previous_kept = run.previous_image is not None
-        run.previous_running = run.previous_kept
         return None
-    sh(["docker", "rm", "-f", prev], log, 120)                  # a stale copy from an earlier deploy
     run.previous_running = inspect(run.prod_name, "{{.State.Running}}") == "true"
     if sh(["docker", "stop", run.prod_name], log, 120) != 0:
-        sh(["docker", "start", run.prod_name], log, 120)
+        if run.previous_running:
+            sh(["docker", "start", run.prod_name], log, 120)
         return "cannot stop the current container"
     if sh(["docker", "rename", run.prod_name, prev], log, 60) != 0:
         if run.previous_running:
@@ -637,7 +641,10 @@ def deploy(run: "Run"):
         run.deployed = True
         return "ok", {"container": run.prod_name, "image": run.prod_image,
                       "previous": run.previous_image}, ["deploy.log"], f"{run.prod_name} -> {run.prod_image}"
-    container_logs(run.prod_name, run.dir / "deploy-app.log")
+    try:
+        container_logs(run.prod_name, run.dir / "deploy-app.log")
+    except Exception as e:                                       # never skip the rollback for a log
+        (run.dir / "deploy-app.log").write_text(f"could not collect the logs: {e}\n")
     rolled = rollback(run, log)
     return _error(f"new version {why or 'unhealthy'}; {rolled}", ["deploy.log", "deploy-app.log"])
 

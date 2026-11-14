@@ -99,7 +99,8 @@ RESERVED_ALIASES = ("app", "probe", "zap", *SERVICES)
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")          # mount names, networks, users, stages
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-# URL paths: no quote, space or shell character, since a path reaches the probe's `sh -c` command.
+# URL paths reach the probe's `sh -c` command inside single quotes: no quote, space, backslash, `$` or
+# backtick may appear, so the quoting cannot be broken (`;`, `&` and `?` are harmless inside it).
 _URL_PATH = re.compile(r"/[A-Za-z0-9._~%:@+,;=/-]*(\?[A-Za-z0-9._~%:@+,;=/&?-]*)?")
 _CPUS = re.compile(r"[0-9]+(\.[0-9]+)?")
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -175,7 +176,7 @@ class Contract:
         return list(self.networks) or [s.prod_network]
 
 
-_FROM = re.compile(r"^\s*FROM\s+\S+(?:\s+AS\s+([A-Za-z0-9_.-]+))?", re.IGNORECASE | re.MULTILINE)
+_FROM = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*\S+(?:\s+AS\s+([A-Za-z0-9_.-]+))?", re.IGNORECASE | re.MULTILINE)
 
 
 def _table(data: dict, key: str) -> dict:
@@ -252,7 +253,7 @@ def _target(v: str) -> str:
 
 
 def _memory(t: dict) -> str:
-    v = _str(t, "deploy", "memory", "", None)
+    v = _str(t, "deploy", "memory", "", None).lower()           # Docker accepts 512M as 512m
     if v:
         m = _MEMORY.fullmatch(v)
         unit = {"": 1, "b": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}

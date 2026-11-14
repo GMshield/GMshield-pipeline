@@ -340,7 +340,8 @@ class ReviewPatchTest(unittest.TestCase):
     def test_memory_minimum(self):
         for ok in ('"6m"', '"6291456"', '"6144k"', '"1g"', '"512m"'):
             self.assertEqual(self.opt(f"memory = {ok}").memory, ok.strip('"'))
-        for bad in ('"1b"', '"5m"', '"6291455"', '" 512m"', '"512M"', '"512mb"', '"0m"'):
+        self.assertEqual((self.opt('memory = "512M"').memory, self.opt('memory = "1G"').memory), ("512m", "1g"))
+        for bad in ('"1b"', '"5m"', '"6291455"', '" 512m"', '"512mb"', '"0m"', '"5M"'):
             with self.assertRaisesRegex(ContractError, r"\[deploy\].memory"):
                 self.opt(f"memory = {bad}")
 
@@ -384,6 +385,9 @@ class ReviewPatchTest(unittest.TestCase):
         self.assertEqual(self.opt(rest='[test]\ntarget = "Integration"', dockerfile=df).integration_target,
                          "integration")
         self.assertEqual(self.opt(rest='[test]\ntarget = "it"').integration_target, "it")   # no Dockerfile yet
+        flagged = "FROM --platform=$BUILDPLATFORM a AS build\nfrom --platform=linux/amd64 --x=y b as Stand-In\nFROM c\n"
+        c = self.opt(rest='[[staging.companions]]\ntarget = "stand-in"\nalias = "s"', dockerfile=flagged)
+        self.assertEqual(c.dockerfile_stages, ["build", "stand-in"])
 
     def test_url_paths(self):
         for ok in ("/", "/actuator/health", "/api/health?full=1&x=y", "/a%20b", "/v3/api-docs:x"):
@@ -518,9 +522,8 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(inspects, ["gmshield-app", "gmshield-data"])
         self.assertEqual(self.cmds.index(["docker", "network", "inspect", "gmshield-data"]), 1)   # checked first
         verbs = [c[:2] + ([c[2]] if c[1] == "network" else []) for c in self.prod_cmds()]
-        self.assertEqual(verbs, [["docker", "rm"], ["docker", "stop"], ["docker", "rename"], ["docker", "rm"],
+        self.assertEqual(verbs, [["docker", "stop"], ["docker", "rename"], ["docker", "rm"],
                                  ["docker", "create"], ["docker", "network", "connect"], ["docker", "start"]])
-        self.assertIn(["docker", "rm", "-f", "gmshield-api-previous"], self.cmds)     # a stale copy, if any
         self.assertIn(["docker", "rename", "gmshield-api", "gmshield-api-previous"], self.cmds)
         self.assertEqual(self.docker_cmds("network")[-1], ["docker", "network", "connect", "gmshield-data", "gmshield-api"])
         create = self.docker_cmds("create")[0]
@@ -588,6 +591,59 @@ class RuntimeTest(unittest.TestCase):
         self.assertNotIn(["docker", "rm", "-f", "gmshield-api-previous"], self.cmds)
         self.assertEqual(self.prod_cmds()[-2:], [["docker", "rename", "gmshield-api-previous", "gmshield-api"],
                                                  ["docker", "start", "gmshield-api"]])
+
+    def test_both_containers_present_keeps_previous_as_the_target(self):
+        """An interrupted deploy left the last good container aside: it stays the rollback target."""
+        self.inspected[("gmshield-api-previous", "{{.Config.Image}}")] = "localhost:5000/gmshield-api:good"
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        _, _, _, detail = stages.deploy(run)
+        self.assertIn("rolled back to localhost:5000/gmshield-api:good", detail)
+        self.assertNotIn(["docker", "rm", "-f", "gmshield-api-previous"], self.cmds)
+        self.assertEqual(self.docker_cmds("stop") + [c for c in self.cmds if c[:3] == ["docker", "rename", "gmshield-api"]], [])
+        self.assertEqual(self.prod_cmds()[0], ["docker", "rm", "-f", "gmshield-api"])   # the unverified one goes
+        self.assertEqual(self.prod_cmds()[-2:], [["docker", "rename", "gmshield-api-previous", "gmshield-api"],
+                                                 ["docker", "start", "gmshield-api"]])
+
+    def test_rename_back_fails(self):
+        self.capture_rc["docker rename gmshield-api-previous"] = 1
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        _, _, _, detail = stages.deploy(run)
+        self.assertIn("ROLLBACK FAILED", detail)
+        self.assertEqual((run.rolled_back, run.previous_kept), (False, True))
+
+    def test_restart_of_previous_fails(self):
+        self.capture_rc["docker start gmshield-api"] = 1
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        _, _, _, detail = stages.deploy(run)
+        self.assertIn("ROLLBACK FAILED", detail)
+        self.assertEqual((run.rolled_back, run.previous_kept), (False, True))
+
+    def test_stop_fails_production_unchanged(self):
+        self.capture_rc["docker stop gmshield-api"] = 1
+        for running, starts in (("true", [["docker", "start", "gmshield-api"]]), ("false", [])):
+            self.cmds.clear()
+            self.inspected[("gmshield-api", "{{.State.Running}}")] = running
+            run = self.run_for('[service]\nport = 80\n')
+            outcome, _, _, detail = stages.deploy(run)
+            self.assertEqual(outcome, "error")
+            self.assertIn("cannot stop the current container; production unchanged", detail)
+            self.assertEqual(self.docker_cmds("start"), starts)       # a stopped container is not started
+            self.assertEqual(self.docker_cmds("rename") + self.docker_cmds("create") + self.docker_cmds("run"), [])
+
+    def test_log_collection_failure_still_rolls_back(self):
+        def boom(name, dest):
+            raise subprocess.TimeoutExpired("docker logs", 60)
+        run = self.run_for('[service]\nport = 80\n')
+        run.docker.rc = {"probe": 1}
+        with mock.patch.object(stages, "container_logs", boom):
+            outcome, _, _, detail = stages.deploy(run)
+        self.assertEqual(outcome, "error")
+        self.assertIn("rolled back to localhost:5000/gmshield-api:old", detail)
+        self.assertTrue(run.rolled_back)
+        self.assertIn("could not collect the logs", (run.dir / "deploy-app.log").read_text())
 
     def test_current_container_that_cannot_be_set_aside_keeps_running(self):
         self.capture_rc["docker rename gmshield-api"] = 1

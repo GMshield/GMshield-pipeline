@@ -128,8 +128,8 @@ certificates folder. It then stops the current container and renames it, unchang
 `gmshield-<service>-previous`, and creates the new one. If the new container cannot be created,
 connected or started, is unhealthy, or fails the post-deploy DAST gate, it is removed and the previous
 container is renamed back and started exactly as it was (its own image, networks, mounts and
-settings, not rebuilt from the new contract). Once the release stands, the previous container is
-removed. Named volumes are never removed by a deploy.
+settings, not rebuilt from the new contract). The previous container is removed once the
+post-deploy DAST passes (or fails while `rollback_on_fail` is off). Named volumes are never removed by a deploy.
 
 **Test mode.** The pipeline alone sets `GMSHIELD_MODE=test`, in the staging copy, its companions and
 the integration tests; a contract that names `GMSHIELD_MODE` in any env table is refused. The
