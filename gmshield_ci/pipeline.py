@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import github, gitops, report, sonar, stages
-from .config import RUNNER_DIR, Contract, Repo, Settings, load_contract
+from .config import RUNNER_DIR, Contract, ContractError, Repo, Settings, load_contract
 from .dockerops import Docker, capture, cleanup_label, prune_images, sh
 
 TITLES = {"sca": "SCA & SBOM (Trivy)", "iac": "IaC misconfiguration (Trivy)"}
@@ -51,6 +51,7 @@ class Run:
         self.log_opts = sha
         self.image_built = self.deployed = self.rolled_back = False
         self.previous_image: str | None = None
+        self.previous_kept = self.previous_running = False   # gmshield-<service>-previous, kept for rollback
         self.promotions: dict = {}
         self.result = "running"
         self.notes: list[str] = []
@@ -117,7 +118,11 @@ def single_instance(s: Settings):
 
 def _resolve(run: Run):
     gitops.export(run.mirror, run.sha, run.src)
-    run.contract = load_contract(run.src, run.repo.name)
+    try:
+        run.contract = load_contract(run.src, run.repo.name)
+    except ContractError as e:
+        why = f"contract refused: {e}"
+        return "error", {"error": why}, [], why
     run.tree = gitops.tree(run.mirror, run.sha)
     run.commit = gitops.commit_info(run.mirror, run.sha)
     c = run.contract
@@ -157,6 +162,7 @@ def develop_flow(run: Run) -> None:
         _source_checks(run, with_tests=True)
         stages.execute(run, "sonar", "SAST & quality (SonarQube)", "sonar", sonar.analyze)
         stages.execute(run, "image", "Container image (build, SBOM & scan)", "image", stages.image)
+        stages.execute(run, "integration_tests", "Integration tests", None, stages.integration_tests)
         stages.execute(run, "dast", "DAST (OWASP ZAP, active, staging)", "dast_develop", stages.dast_staging)
     run.result = "passed" if _passed(run) else "failed"
     if run.mode == "full" and run.result == "passed":
@@ -189,6 +195,8 @@ def main_flow(run: Run) -> None:
             if dast.status == "failed" and run.s.gates.get("dast_main", {}).get("rollback_on_fail", True):
                 msg = stages.rollback(run, run.dir / "deploy.log")
                 run.notes.append(f"Post-deploy DAST failed: {msg}.")
+            else:
+                stages.discard_previous(run)    # the new version stands; the kept previous one goes
     elif run.contract.self_update and _passed(run):
         stages.execute(run, "deploy", "Deploy (pipeline self-update)", None, _self_update)
     run.result = "passed" if _passed(run) else "failed"

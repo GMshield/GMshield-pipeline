@@ -64,6 +64,6 @@ curl -fsS http://127.0.0.1:18080/health >/dev/null && echo "  OK   production st
 
 echo "== artifacts"
 find "$T/home/artifacts" -maxdepth 3 -mindepth 3 | sort
-docker rm -f gmshield-sample >/dev/null 2>&1 || true
+docker rm -f gmshield-sample gmshield-sample-previous >/dev/null 2>&1 || true
 python3 -m gmshield_ci sonar-delete GMshield-sample >/dev/null
 [ "$FAILED" = 0 ] && echo "E2E PASSED" || { echo "E2E FAILED"; exit 1; }

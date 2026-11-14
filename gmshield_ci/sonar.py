@@ -214,6 +214,41 @@ def delete_project(key: str) -> int:
 
 # ------------------------------------------------------------------ the pipeline stage
 
+JDK_IN_IMAGE = "/opt/java/openjdk"      # where the pinned eclipse-temurin image keeps its JDK
+JDK_MOUNT = "/opt/gmshield-jdk"         # where the scanner sees it (read-only)
+UNRESOLVED = "Unresolved imports/types"
+
+
+def jdk_home(run: "Run", log: Path) -> Path | None:
+    """The pinned JDK (tools.toml images.jdk27), extracted once into cache/jdk/<digest>.
+
+    SonarQube resolves the JDK's own types from it, so code for a newer Java than the scanner's
+    runtime is analysed with the right standard library.
+    """
+    ref = run.s.images.get("jdk27")
+    if not ref or "@sha256:" not in ref:
+        return None
+    dest = run.s.cache / "jdk" / ref.rsplit("@sha256:", 1)[1]
+    if (dest / "release").is_file():
+        return dest
+    tmp = dest.with_name(dest.name + ".partial")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    cname = f"gmshield-ci-{run.id}-jdk"
+    if sh(["docker", "create", "--name", cname, *run.docker.labels, ref], log, 900) != 0:
+        return None
+    try:
+        rc = sh(["docker", "cp", f"{cname}:{JDK_IN_IMAGE}", str(tmp)], log, 900)
+    finally:
+        sh(["docker", "rm", "-f", "-v", cname], None, 120)
+    if rc != 0 or not (tmp / "release").is_file():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    shutil.rmtree(dest, ignore_errors=True)      # an incomplete copy from an interrupted earlier run
+    tmp.rename(dest)
+    return dest
+
+
 def analyze(run: "Run"):
     """Scan the commit, wait for SonarQube's verdict, and return its quality gate result."""
     log = run.dir / "sonarqube.log"
@@ -225,20 +260,39 @@ def analyze(run: "Run"):
         shutil.copytree(reports, run.src / ".gmshield-reports", dirs_exist_ok=True)
     args = [f"-Dsonar.projectKey={key}", f"-Dsonar.projectName={key}", "-Dsonar.scm.disabled=true",
             "-Dsonar.working.directory=.scannerwork", f"-Dsonar.analysis.commit={run.sha}"]
+    warnings: list[str] = []
+    mounts = []
     if (run.src / ".gmshield-reports" / "classes").is_dir():
         args.append("-Dsonar.java.binaries=.gmshield-reports/classes")
+        jdk = jdk_home(run, log)
+        if jdk:
+            args.append(f"-Dsonar.java.jdkHome={JDK_MOUNT}")
+            mounts.append((jdk, JDK_MOUNT, "ro"))
+        else:
+            warnings.append("the pinned JDK (tools.toml images.jdk27) could not be prepared; "
+                            "Java types are resolved against the scanner's own runtime")
+    libraries = run.src / ".gmshield-reports" / "libraries"      # the project's dependency jars
+    if libraries.is_dir() and any(libraries.glob("*.jar")):
+        jars = ".gmshield-reports/libraries/*.jar"
+        # Test code also uses the main classes: without them SonarQube reports them as unresolved.
+        main = ".gmshield-reports/classes," if (run.src / ".gmshield-reports" / "classes").is_dir() else ""
+        args += [f"-Dsonar.java.libraries={jars}", f"-Dsonar.java.test.libraries={main}{jars}"]
     cache = run.s.cache / "sonar"
     cache.mkdir(parents=True, exist_ok=True)
     rc = run.docker.run("sonar-scanner", run.s.images["sonar_scanner"], args, log=log,
                         timeout=run.s.limit("sonar", 1800), network=NETWORK, workdir="/usr/src",
                         mounts=[(run.src, "/usr/src", "rw"), (cache, "/cache", "rw"),
-                                stages.private_home(run, "sonar-scanner")],
+                                stages.private_home(run, "sonar-scanner"), *mounts],
                         env={"SONAR_HOST_URL": INTERNAL_URL, "SONAR_USER_HOME": "/cache",
                              "HOME": stages.CONTAINER_HOME},
                         secret_env={"SONAR_TOKEN": tok})
     task_file = run.src / ".scannerwork" / "report-task.txt"
+    if log.is_file() and UNRESOLVED in log.read_text(errors="replace"):
+        warnings.append(f"SonarQube reported \"{UNRESOLVED}\": some Java types were not resolved, "
+                        "so findings that depend on them may be missing (see sonarqube.log)")
     if rc != 0 or not task_file.is_file():
-        return "error", {"error": f"sonar-scanner exit {rc}"}, ["sonarqube.log"], f"scanner failed (exit {rc})"
+        return "error", {"error": f"sonar-scanner exit {rc}", "warnings": warnings}, ["sonarqube.log"], \
+            f"scanner failed (exit {rc})"
     task = dict(l.split("=", 1) for l in task_file.read_text().splitlines() if "=" in l)
     deadline = time.monotonic() + run.s.limit("sonar_processing", 600)
     while True:
@@ -247,10 +301,12 @@ def analyze(run: "Run"):
         if state in ("SUCCESS", "FAILED", "CANCELED"):
             break
         if time.monotonic() > deadline:
-            return "error", {"error": "SonarQube did not finish processing in time"}, ["sonarqube.log"], "timeout"
+            return "error", {"error": "SonarQube did not finish processing in time", "warnings": warnings}, \
+                ["sonarqube.log"], "timeout"
         time.sleep(3)
     if state != "SUCCESS":
-        return "error", {"error": f"SonarQube processing {state}"}, ["sonarqube.log"], f"processing {state}"
+        return "error", {"error": f"SonarQube processing {state}", "warnings": warnings}, ["sonarqube.log"], \
+            f"processing {state}"
     _, qg = api("GET", "/api/qualitygates/project_status", {"analysisId": d["task"].get("analysisId", "")}, auth=tok)
     ps = qg.get("projectStatus", {})
     _, ms = api("GET", "/api/measures/component", {"component": key, "metricKeys": MEASURES}, auth=tok)
@@ -269,7 +325,7 @@ def analyze(run: "Run"):
     (run.dir / "sonarqube.json").write_text(json.dumps(report, indent=2))
     top = failed + ([f"{to_review} security hotspot(s) need a decision in SonarQube: {dashboard}"] if to_review else [])
     metrics = {"status": report["quality_gate"], "failed": failed, "measures": measures,
-               "hotspots_to_review": to_review, "dashboard": dashboard, "top": top}
+               "hotspots_to_review": to_review, "dashboard": dashboard, "top": top, "warnings": warnings}
     m = measures
     detail = (f"quality gate {report['quality_gate']}; security {m.get('software_quality_security_rating', '-')}, "
               f"reliability {m.get('software_quality_reliability_rating', '-')}, "
