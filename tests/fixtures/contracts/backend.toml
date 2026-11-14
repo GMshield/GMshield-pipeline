@@ -1,0 +1,17 @@
+# GMshield pipeline contract (see GMshield-pipeline/templates/pipeline.toml for every option).
+# Active: the Dockerfile has the stages `test`, `test-reports` and `production`.
+
+[service]
+name = "backend"
+port = 8080                    # HTTP port inside the container (0 = no HTTP, no DAST)
+health_path = "/actuator/health"
+
+[build]
+test_target = "test"         # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"
+openapi = "/v3/api-docs/public"   # ZAP API scan of the public contract (committed as openapi/public.json)
+
+[deploy]
+host_port = 8080               # 127.0.0.1:<host_port> on roberto-server (0 = not published)

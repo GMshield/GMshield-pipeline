@@ -1,0 +1,16 @@
+# GMshield pipeline contract (see GMshield-pipeline/templates/pipeline.toml for every option).
+
+[service]
+name = "worker"
+port = 0                    # the worker opens no listening port: no staging, no DAST
+health_path = "/"           # unused without a port; health is the image's HEALTHCHECK
+
+[build]
+test_target = "test"         # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"
+openapi = ""                 # no HTTP surface to scan
+
+[deploy]
+host_port = 0               # 127.0.0.1:<host_port> on roberto-server (0 = not published)

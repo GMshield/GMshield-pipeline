@@ -89,7 +89,7 @@ class Docker:
 def cleanup_label(label: str) -> None:
     _, ids = capture(["docker", "ps", "-aq", "--filter", f"label={label}"])
     if ids:
-        sh(["docker", "rm", "-f", *ids.split()], None, 120)
+        sh(["docker", "rm", "-f", "-v", *ids.split()], None, 120)    # -v: their anonymous volumes too
     _, nets = capture(["docker", "network", "ls", "-q", "--filter", f"label={label}"])
     if nets:
         sh(["docker", "network", "rm", *nets.split()], None, 120)

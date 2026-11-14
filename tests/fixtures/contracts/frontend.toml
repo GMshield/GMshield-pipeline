@@ -1,0 +1,17 @@
+# GMshield pipeline contract (see GMshield-pipeline/templates/pipeline.toml for every option).
+# Active: the Dockerfile has the stages `test`, `test-reports`, `stand-in-backend` and `production`.
+
+[service]
+name = "frontend"
+port = 3000                    # HTTP port inside the container (0 = no HTTP, no DAST)
+health_path = "/api/health"    # 200 only when the backend answers with a recent enough contract
+
+[build]
+test_target = "test"         # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"
+openapi = ""                 # the frontend publishes no OpenAPI document
+
+[deploy]
+host_port = 3000               # 127.0.0.1:<host_port> on roberto-server (0 = not published)

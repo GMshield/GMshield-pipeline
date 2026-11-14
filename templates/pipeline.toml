@@ -1,18 +1,25 @@
 # GMshield pipeline contract: copy to .gmshield/pipeline.toml in an app repository.
-# Every key is optional; the values shown are the defaults unless noted.
+# Every key is optional; the values shown are the defaults unless noted. With every default, the
+# containers are started exactly as before the contract grew (Story 1.4). A contract the pipeline
+# refuses (a bad value, an unknown slice or service, GMSHIELD_MODE in an env table) fails
+# "Resolve flow" with the key named, and nothing else runs.
 
 [service]
 name = "backend"            # default: repo name without "GMshield-"
 port = 0                    # HTTP port inside the container; 0 = no HTTP (skips DAST)
 health_path = "/"           # must answer 2xx/3xx when the app is ready
+health_scheme = "http"      # "https": probes run curl --cacert /certs/ca.crt (needs [deploy].certs = true);
+                            # production: <home>/certs/ca.crt must exist and the app's certificate must
+                            # name gmshield-<service>; staging: a throwaway CA per run (see [deploy].certs)
 
 [build]
 dockerfile = "Dockerfile"
 context = "."
 test_target = "test"        # Dockerfile stage that runs the unit tests
 # Optional "test-reports" stage (FROM scratch): its files land in the artifacts and, for SonarQube,
-# in .gmshield-reports/ (Java: put compiled classes in classes/; point coverage paths there from
-# sonar-project.properties, e.g. sonar.coverage.jacoco.xmlReportPaths=.gmshield-reports/jacoco.xml)
+# in .gmshield-reports/ (Java: put compiled classes in classes/ and the dependency jars in libraries/;
+# point coverage paths there from sonar-project.properties,
+# e.g. sonar.coverage.jacoco.xmlReportPaths=.gmshield-reports/jacoco.xml)
 
 [dast]
 path = "/"                  # where ZAP starts crawling
@@ -22,3 +29,45 @@ openapi = ""                # e.g. "/v3/api-docs": ZAP API scan instead of crawl
 host_port = 0               # publish on 127.0.0.1:<host_port> in production; 0 = not published
 env = {}                    # non-secret settings, e.g. { SPRING_PROFILES_ACTIVE = "prod" }
                             # secrets: ~/gmshield-ci/secrets/<service>.env on roberto-server
+                            # GMSHIELD_MODE is refused here: the pipeline alone sets it
+# Resources and placement. Production and staging get the same limits and hardening; staging
+# always runs in the CI slice (ci.slice), whatever `slice` says.
+memory = ""                 # e.g. "768m" or "2g" (docker --memory); "" = no limit
+cpus = ""                   # e.g. 1.5 (docker --cpus); "" = no limit
+slice = ""                  # production cgroup slice: "containers.slice" or "ai.slice"; "" = Docker's default
+networks = []               # production networks, e.g. ["gmshield-app", "gmshield-data"]; [] = the
+                            # pipeline's prod network. Created on the first, then connected to the others;
+                            # probes and ZAP join the first one only. A missing network fails the deploy
+                            # before production is touched. "host" and "none" are refused.
+# Hardening. Any of read_only, user, cap_drop also adds --security-opt no-new-privileges.
+read_only = false           # --read-only root filesystem (add tmpfs for the paths the app writes)
+user = ""                   # e.g. "10001:10001"; "" = the image's USER
+cap_drop = []               # e.g. ["ALL"]
+tmpfs = []                  # e.g. ["/tmp", "/run/app:size=16m"]
+mounts = []                 # e.g. [{ name = "uploads", target = "/data/uploads", read_only = false }]
+                            # The source is a name, never a host path: production uses
+                            # ~/gmshield-ci/mounts/<service>/<name> (created mode 0700), staging a fresh
+                            # folder per run. --privileged, --cap-add and host paths cannot be asked for.
+certs = false               # true: ~/gmshield-ci/certs is mounted read-only at /run/gmshield/certs in
+                            # production; staging mounts a throwaway ca.crt, tls.crt and tls.key there
+                            # instead (leaf for "app" and "<service>"), made with openssl for that run only
+
+[staging]
+# The develop pipeline's throwaway copy of the app (active DAST), started with GMSHIELD_MODE=test on
+# an internal network with no internet.
+env = {}                    # added over [deploy].env in staging only; GMSHIELD_MODE is refused here too
+services = []               # throwaway services, ready before the app starts: "postgres", "redis".
+                            # Fixed test-mode credentials (match GMshield-backend's application-test-mode.yaml):
+                            #   postgres:5432, database and user "gmshield", password "gmshield-test-mode"
+                            #   redis:6379, no password
+# Companions: other stages of this Dockerfile, built and run beside the app under an alias.
+# [[staging.companions]]
+# target = "stand-in-backend"
+# alias = "stand-in-backend"
+
+[test]
+# Integration tests (develop, full run, after the image): this Dockerfile stage is built and run as a
+# container with GMSHIELD_MODE=test on an internal network beside the services; exit 0 passes.
+# Time limit: limits.integration_tests in tools.toml (1800 s). Without a target the stage is skipped.
+target = ""                 # e.g. "integration"
+services = []               # as [staging].services
