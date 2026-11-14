@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import gates
-from .config import SERVICES, Contract, container_args
+from .config import Contract, container_args
 from .dockerops import UID, capture, container_healthy, container_logs, inspect, sh
 
 if TYPE_CHECKING:  # pragma: no cover
