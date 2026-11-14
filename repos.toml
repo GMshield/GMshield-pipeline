@@ -4,7 +4,7 @@
 org = "GMshield"
 branches = ["develop", "main"]       # develop: verify + gate; main: build, publish, deploy, DAST
 registry = "localhost:5000"           # production image registry (runs on roberto-server)
-prod_network = "rpg_default"          # Docker network shared with postgres, redis, qdrant
+prod_network = "gmshield-app"         # default when a contract names no networks (infra/compose.yaml creates it)
 ci_slice = "ci.slice"                 # cgroup for every CI container (capped, low priority)
 
 [[repo]]
