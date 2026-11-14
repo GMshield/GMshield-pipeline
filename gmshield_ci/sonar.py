@@ -271,8 +271,10 @@ def analyze(run: "Run"):
             warnings.append("the pinned JDK (tools.toml images.jdk27) could not be prepared; "
                             "Java types are resolved against the scanner's own runtime")
     if (run.src / ".gmshield-reports" / "libraries").is_dir():   # the project's dependency jars
-        args += ["-Dsonar.java.libraries=.gmshield-reports/libraries/*.jar",
-                 "-Dsonar.java.test.libraries=.gmshield-reports/libraries/*.jar"]
+        jars = ".gmshield-reports/libraries/*.jar"
+        # Test code also uses the main classes: without them SonarQube reports them as unresolved.
+        main = ".gmshield-reports/classes," if (run.src / ".gmshield-reports" / "classes").is_dir() else ""
+        args += [f"-Dsonar.java.libraries={jars}", f"-Dsonar.java.test.libraries={main}{jars}"]
     cache = run.s.cache / "sonar"
     cache.mkdir(parents=True, exist_ok=True)
     rc = run.docker.run("sonar-scanner", run.s.images["sonar_scanner"], args, log=log,

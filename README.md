@@ -70,7 +70,7 @@ SonarQube (26.10 Community Build + PostgreSQL 17, [`sonarqube/compose.yaml`](son
 starts on demand for the analysis and stops when the poll ends, unless someone had it open already.
 Java projects must export compiled classes to `classes/` in their `test-reports` stage, and should
 export their dependency jars (the test runtime classpath) to `libraries/`: the pipeline then passes
-`sonar.java.binaries`, `sonar.java.libraries` and `sonar.java.test.libraries`. For Java projects the
+`sonar.java.binaries`, `sonar.java.libraries` and `sonar.java.test.libraries` (the jars plus the compiled main classes). For Java projects the
 scanner also gets `sonar.java.jdkHome`: the JDK of the pinned `jdk27` image in `tools.toml` (the
 backend's own build image), extracted once into `~/gmshield-ci/cache/jdk/<digest>` and mounted
 read-only, so Java 27 types resolve although the scanner runs on an older Java. If the scanner log
