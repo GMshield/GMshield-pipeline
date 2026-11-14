@@ -21,6 +21,7 @@ TOOLS = ["id", "cryptsetup", "systemd-cryptenroll", "rsync", "fallocate", "lvcre
 STORES = ["var/lib/docker", "var/lib/containerd", "home/roberto/gmshield-ci", "home/roberto/stack",
           "home/roberto/.config/gmshield"]
 STEPS = 15
+OK_INPUT = "yes\nsaved\nfake-recovery-key\n"     # confirm, recovery key saved, recovery key typed back
 
 
 class EncryptVolumeTest(unittest.TestCase):
@@ -80,7 +81,7 @@ class EncryptVolumeTest(unittest.TestCase):
         return self.log.read_text().splitlines()
 
     def setup_ok(self):
-        res = self.run_script("setup", stdin="yes\nsaved\n")
+        res = self.run_script("setup", stdin=OK_INPUT)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         return res
 
@@ -137,6 +138,11 @@ class EncryptVolumeTest(unittest.TestCase):
                 self.assertEqual(res.returncode, 1)
                 self.assertIn(reason, res.stderr)
                 self.assertIn("FAILED at step 0: Preconditions", res.stderr)
+        (self.bin / "lvcreate").unlink()                     # /usr/sbin is not on the test PATH
+        res = self.run_script("setup", stdin="yes\n")
+        self.assertIn("missing tool: lvcreate", res.stderr)
+        self.assertIn("FAILED at step 0", res.stderr)
+        (self.bin / "lvcreate").symlink_to(STUB)
         (self.root / "dev/tpmrm0").unlink()
         res = self.run_script("setup", stdin="yes\n")
         self.assertIn("no TPM", res.stderr)
@@ -151,6 +157,9 @@ class EncryptVolumeTest(unittest.TestCase):
         self.assertEqual(sorted(st["slots"]), ["recovery", "tpm2"])          # the setup key slot is wiped
         self.assertFalse((r / "run/gmshield-setup.key").exists())
         self.assertIn("--tpm2-pcrs=", "\n".join(self.calls()))
+        calls = self.calls()
+        first_rsync = next(i for i, c in enumerate(calls) if c.startswith("rsync"))
+        self.assertLess(calls.index("docker stop -t 60 c1 c2 c3 c4"), first_rsync)
         for s in STORES:
             sub = {"home/roberto/.config/gmshield": "config-gmshield"}.get(s, Path(s).name)
             self.assertEqual(st["mounts"][f"{r}/{s}"], f"/dev/mapper/gmshield[/{sub}]")
@@ -192,6 +201,22 @@ class EncryptVolumeTest(unittest.TestCase):
         self.assertIn("not unlocked by the TPM", res.stderr)
         self.assertEqual(self.snapshot(), before)
 
+        # after a reboot, an unhealthy postgres or a leftover password slot still blocks finish
+        res = self.run_script("finish", STUB_UNHEALTHY="postgres")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("check failed: data stack: postgres is not healthy", res.stderr)
+        self.assertEqual(self.snapshot(), before)
+        st = self.st()
+        st["slots"].append("password")
+        self.state.write_text(json.dumps(st))
+        before = self.snapshot()
+        res = self.run_script("finish")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("check failed: a password key slot is still enrolled", res.stderr)
+        self.assertEqual(self.snapshot(), before)
+        st["slots"].remove("password")
+        self.state.write_text(json.dumps(st))
+
         # status after the reboot: every check passes
         res = self.run_script("status")
         self.assertIn("Finish checks: all pass", res.stdout)
@@ -215,7 +240,7 @@ class EncryptVolumeTest(unittest.TestCase):
 
     # ---------- failures ----------
     def test_copy_failure_keeps_originals_and_restarts_services(self):
-        res = self.run_script("setup", stdin="yes\nsaved\n", STUB_FAIL="rsync")
+        res = self.run_script("setup", stdin=OK_INPUT, STUB_FAIL="rsync")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("FAILED at step 11: Copy every store onto the volume", res.stderr)
         self.assert_originals_in_place()
@@ -234,8 +259,56 @@ class EncryptVolumeTest(unittest.TestCase):
         self.assertNotRegex(res.stdout, rf"==> 11/{STEPS} [^\n]*\n    already done")
         self.assertEqual(self.st()["running"], ["c1", "c2", "c3", "c4"])
 
+    def test_bind_mount_failure_keeps_services_stopped_then_rerun_completes(self):
+        res = self.run_script("setup", stdin=OK_INPUT, STUB_MOUNT_FAIL="var/lib/docker")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAILED at step 12", res.stderr)
+        self.assertIn("Services stay stopped", res.stderr)
+        st = self.st()
+        self.assertNotIn("docker.service", st["active"])
+        self.assertNotIn("containerd.service", st["active"])
+        self.assertEqual((self.root / "var/lib/docker.plain/data.txt").read_text(), "plain text of var/lib/docker\n")
+        res = self.run_script("setup", stdin="yes\n")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.st()["running"], ["c1", "c2", "c3", "c4"])
+
+    def test_copy_that_differs_moves_nothing(self):
+        res = self.run_script("setup", stdin=OK_INPUT, STUB_RSYNC_DIFF="1")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("differs", res.stderr)
+        self.assertIn("FAILED at step 11", res.stderr)
+        self.assert_originals_in_place()
+        self.assertIn("docker.service", self.st()["active"])
+
+    def test_wrong_recovery_key_fails_step_4_then_rerun_passes(self):
+        res = self.run_script("setup", stdin="yes\nsaved\nnot-the-key\n")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAILED at step 4", res.stderr)
+        self.assertIn("not the recovery key", res.stderr)
+        self.assertFalse((self.root / "var/lib/gmshield/encrypt-volume/recovery-saved").exists())
+        self.assertIn("password", self.st()["slots"])                         # setup key not wiped
+        res = self.run_script("setup", stdin=OK_INPUT)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(sorted(self.st()["slots"]), ["recovery", "tpm2"])
+
+    def test_running_pipeline_refuses_and_restarts_services(self):
+        st = self.st()
+        st["active"].append("gmshield-ci.service")
+        self.state.write_text(json.dumps(st))
+        res = self.run_script("setup", stdin=OK_INPUT, GMSHIELD_CI_WAIT="0")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("a pipeline run is still going", res.stderr)
+        self.assertIn("FAILED at step 10", res.stderr)
+        self.assertNotIn("systemctl stop gmshield-ci.service ai-healthcheck.service gmshield-dashboard.service",
+                         self.calls())
+        st = self.st()
+        for u in ("gmshield-ci.timer", "ai-healthcheck.timer", "docker.service", "gmshield-ci.service"):
+            self.assertIn(u, st["active"])
+        self.assertEqual(st["running"], ["c1", "c2", "c3", "c4"])
+        self.assert_originals_in_place()
+
     def test_tpm_unlock_failure_stops_before_touching_data(self):
-        res = self.run_script("setup", stdin="yes\nsaved\n", STUB_TPM_BROKEN="1")
+        res = self.run_script("setup", stdin=OK_INPUT, STUB_TPM_BROKEN="1")
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("FAILED at step 5", res.stderr)
         self.assertTrue((self.root / "run/gmshield-setup.key").exists())       # kept until the TPM unlocks
@@ -247,7 +320,7 @@ class EncryptVolumeTest(unittest.TestCase):
         res = self.run_script("setup", stdin="yes\nnope\n")
         self.assertEqual(res.returncode, 1)
         self.assertIn("FAILED at step 4: Enroll the recovery key", res.stderr)
-        res = self.run_script("setup", stdin="yes\nsaved\n")
+        res = self.run_script("setup", stdin=OK_INPUT)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("systemd-cryptenroll --wipe-slot=recovery " + str(self.root / "var/lib/gmshield/volume.luks"),
                       self.calls())

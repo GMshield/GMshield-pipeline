@@ -33,6 +33,7 @@ OLD_SWAP=/swap.img
 STATE=/var/lib/gmshield/encrypt-volume
 SETUP_KEY=/run/gmshield-setup.key
 MIN_FREE_GIB=60
+CI_WAIT=${GMSHIELD_CI_WAIT:-900}   # seconds a running pipeline poll gets to finish (shorter in the tests)
 CI_USER=roberto
 UHOME=/home/$CI_USER
 GIB=1073741824
@@ -167,10 +168,11 @@ stop_services() {
   run rm -f "$st/copied"
   run systemctl stop gmshield-ci.timer ai-healthcheck.timer
   if [ "$DRY" = 0 ]; then                      # let a pipeline run in progress finish (up to 15 minutes)
-    while active gmshield-ci.service && [ "$waited" -lt 900 ]; do
+    while active gmshield-ci.service && [ "$waited" -lt "$CI_WAIT" ]; do
       [ "$waited" -eq 0 ] && echo "    waiting for the running pipeline poll to finish"
       sleep 5; waited=$((waited + 5))
     done
+    if active gmshield-ci.service; then die "a pipeline run is still going; rerun setup when it ends"; fi
   fi
   run systemctl stop gmshield-ci.service ai-healthcheck.service gmshield-dashboard.service
   if active docker.service; then
@@ -219,11 +221,11 @@ wait_healthy() {
 
 on_exit() {
   local rc=$? half
+  set +e                       # a hung-up terminal or a failing restart must not change the exit code
   trap - EXIT
   [ "$rc" -eq 0 ] && exit 0
   [ -n "$CUR" ] && echo "FAILED at step $CUR: $CUR_NAME" >&2
   if [ "$SERVICES_STOPPED" = 1 ]; then
-    set +e
     half=$(half_switched)
     if [ -n "$half" ]; then
       echo "Services stay stopped: $(echo "$half" | xargs) is between its original and the volume." >&2
@@ -232,7 +234,7 @@ on_exit() {
       echo "Starting the services again on the current data..." >&2
       rm -f "$(p "$STATE")/copied"
       start_services >&2
-      wait_healthy >&2
+      (wait_healthy) >&2 || true
     fi
   fi
   exit "$rc"
@@ -350,6 +352,11 @@ a_recovery() {
   printf 'Type saved once the recovery key is written down: '
   read -r ans || ans=""
   [ "$ans" = saved ] || die "the recovery key was not confirmed; rerun setup to get a new one"
+  printf 'Type the recovery key back to check it (not shown): '
+  read -rs ans || ans=""
+  echo
+  printf '%s' "$ans" | cryptsetup open --test-passphrase --key-file=- "$(p "$CONTAINER")" >/dev/null 2>&1 ||
+    die "that is not the recovery key; rerun setup to get a new one"
   mkdir -p "$(p "$STATE")"
   touch "$(p "$STATE")/recovery-saved"
 }
@@ -427,6 +434,8 @@ a_switched() {
     sub=$(store_sub "$s"); path=$(store_path "$s")
     store_switched "$sub" "$path" && continue
     live=$(p "$path"); plain="$live.plain"
+    # the bind line goes in before the move, so a crash in between never leaves Docker an empty folder
+    ensure_line /etc/fstab "$(p "$MNT")/$sub $live none bind,nofail,x-systemd.requires-mounts-for=$(p "$MNT") 0 0"
     if [ -e "$plain" ]; then own=$(stat -c '%u %g %a' "$plain")
     else own=$(stat -c '%u %g %a' "$live"); run mv "$live" "$plain"; fi
     if [ "$DRY" = 0 ] && [ -d "$live" ]; then   # a rerun: the empty mount point is already there
@@ -434,7 +443,6 @@ a_switched() {
     else
       run install -d -o "${own%% *}" -g "$(cut -d' ' -f2 <<<"$own")" -m "${own##* }" "$live"
     fi
-    ensure_line /etc/fstab "$(p "$MNT")/$sub $live none bind,nofail,x-systemd.requires-mounts-for=$(p "$MNT") 0 0"
     run systemctl daemon-reload
     run mount "$live"
     echo "    $path is now the volume's $sub"

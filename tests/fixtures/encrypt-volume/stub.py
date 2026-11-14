@@ -4,6 +4,9 @@
 Linked under the name of every system tool deploy/encrypt-volume.sh calls. Each call is appended to
 $STUB_LOG and acts on a small JSON state ($STUB_STATE): LUKS key slots, open volumes, mounts, swap,
 units and containers. A tool named in $STUB_FAIL (comma-separated) logs its call and exits 23.
+Other hooks: $STUB_TPM_BROKEN (the TPM never unlocks), $STUB_MOUNT_FAIL (a mount target ending in
+it fails), $STUB_UNHEALTHY (that container is not healthy), $STUB_RSYNC_DIFF (the check pass of rsync
+reports a difference), $STUB_JOURNAL (journalctl output).
 Paths in the state are the ones the script passes, already under $GMSHIELD_ROOT.
 """
 import json
@@ -17,6 +20,7 @@ NAME = Path(sys.argv[0]).name
 ARGS = sys.argv[1:]
 ROOT = os.environ.get("GMSHIELD_ROOT", "")
 STATE = Path(os.environ["STUB_STATE"])
+RECOVERY_KEY = "fake-recovery-key"
 NAMES = {"c1": "postgres", "c2": "redis", "c3": "qdrant", "c4": "registry"}
 
 
@@ -70,6 +74,8 @@ def main() -> int:
     elif NAME == "cryptsetup":
         if ARGS[0] == "isLuks":
             rc = 0 if st["luks"] else 1
+        elif ARGS[0] == "open" and "--test-passphrase" in ARGS:
+            rc = 0 if sys.stdin.read() == RECOVERY_KEY else 2
         elif ARGS[0] == "luksFormat":
             st["luks"], st["slots"] = True, ["password"]
         else:
@@ -89,7 +95,7 @@ def main() -> int:
                 st["slots"].append("tpm2")
             if "--recovery-key" in ARGS:
                 st["slots"].append("recovery")
-                out("A secret recovery key has been generated for this volume:\n\n    fake-recovery-key\n")
+                out(f"A secret recovery key has been generated for this volume:\n\n    {RECOVERY_KEY}\n")
     elif NAME == "systemctl":
         verb, units = ARGS[0], [a for a in ARGS[1:] if not a.startswith("-")]
         if verb == "is-active":
@@ -114,7 +120,9 @@ def main() -> int:
         if ARGS[:2] == ["ps", "-q"]:
             out("\n".join(running))
         elif ARGS[0] == "ps":
-            out("\n".join(f"{NAMES[c]} Up 2 minutes" + (" (healthy)" if NAMES[c] in ("postgres", "redis") else "")
+            sick = os.environ.get("STUB_UNHEALTHY", "")
+            out("\n".join(f"{NAMES[c]} Up 2 minutes" + ((" (unhealthy)" if NAMES[c] == sick else " (healthy)")
+                                                       if NAMES[c] in ("postgres", "redis") else "")
                           for c in running))
         elif ARGS[0] == "stop":
             st["running"] = [c for c in running if c not in ARGS]
@@ -138,6 +146,9 @@ def main() -> int:
             out("\n".join(st["mounts"]))
     elif NAME == "mount":
         target = ARGS[-1]
+        fail = os.environ.get("STUB_MOUNT_FAIL")
+        if fail and target.endswith(fail):
+            return 32
         src = fstab_source(target)
         if src is None:
             return 32
@@ -152,7 +163,10 @@ def main() -> int:
         st["swaps"] = [s for s in st["swaps"] if s != ARGS[-1]]
     elif NAME == "rsync":
         flags = "".join(a for a in ARGS if a.startswith("-") and not a.startswith("--"))
-        if "n" not in flags:
+        if "n" in flags:
+            if os.environ.get("STUB_RSYNC_DIFF"):
+                out(">f.st...... data.txt")
+        else:
             src, dst = [a for a in ARGS if not a.startswith("-")][-2:]
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
     elif NAME == "journalctl":
