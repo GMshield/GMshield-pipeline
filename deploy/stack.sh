@@ -42,8 +42,12 @@ preconditions() {
     [ -n "$(value "$STACK/.env" "$k")" ] || r+=("$k is missing in $STACK/.env (run deploy/data-credentials.sh)")
   done
   [ -s "$STACK/redis-users.acl" ] || r+=("$STACK/redis-users.acl is missing (run deploy/data-credentials.sh)")
-  [ -n "$(value "$CI_HOME/secrets/backend.env" GMSHIELD_DB_PASSWORD)" ] ||
+  k=$(value "$CI_HOME/secrets/backend.env" GMSHIELD_DB_PASSWORD)
+  if [ -z "$k" ]; then
     r+=("GMSHIELD_DB_PASSWORD is missing in $CI_HOME/secrets/backend.env (run deploy/data-credentials.sh)")
+  elif [[ $k == *[!A-Za-z0-9]* ]]; then
+    r+=("GMSHIELD_DB_PASSWORD in $CI_HOME/secrets/backend.env holds characters other than letters and digits")
+  fi
   if grep -q '^ *external: true' "$INFRA/compose.yaml" 2>/dev/null; then
     docker volume inspect qdrant_data >/dev/null 2>&1 || r+=("the external volume qdrant_data does not exist")
   fi
@@ -71,9 +75,12 @@ copy_infra() {   # infra/ -> ~/stack, keeping .env and redis-users.acl
 init_postgres() {
   local pw sql
   pw=$(value "$CI_HOME/secrets/backend.env" GMSHIELD_DB_PASSWORD)
-  case $pw in *[!A-Za-z0-9]*) die "GMSHIELD_DB_PASSWORD holds characters other than letters and digits" ;; esac
+  [[ -n $pw && $pw != *[!A-Za-z0-9]* ]] || die "GMSHIELD_DB_PASSWORD must be letters and digits only"
+  # Nothing of this session reaches the server log, not even a failing statement with the password.
   sql=$(cat <<SQL
 \\set ON_ERROR_STOP on
+SET log_min_error_statement = panic;
+SET log_statement = 'none';
 SELECT 'CREATE ROLE gmshield_backend LOGIN' WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gmshield_backend') \\gexec
 ALTER ROLE gmshield_backend WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '$pw';
 SELECT 'CREATE DATABASE gmshield OWNER gmshield_backend' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'gmshield') \\gexec
@@ -84,6 +91,18 @@ SQL
 )
   printf '%s\n' "$sql" | compose exec -T -u postgres postgres psql -X -q -U rpg -d rpg >/dev/null ||
     die "could not create the backend's role and database"
+}
+
+# What each service reads through a bind mount; a digest that differs from the stamp of the last
+# successful `up` recreates that service (certs.sh issue --renew, a new redis-users.acl, a new start script).
+STAMPED=(postgres redis qdrant)
+inputs_digest() {
+  local files=("$GMSHIELD_CERTS/$1/tls.crt" "$GMSHIELD_CERTS/$1/tls.key" "$GMSHIELD_CERTS/$1/ca.crt")
+  case $1 in
+    postgres) files+=("$STACK/postgres/start.sh" "$STACK/postgres/pg_hba.conf" "$STACK/postgres/pg_ident.conf") ;;
+    redis) files+=("$STACK/redis/start.sh" "$STACK/redis-users.acl") ;;
+  esac
+  cat "${files[@]}" 2>/dev/null | sha256sum | cut -d' ' -f1
 }
 
 wait_healthy() {
@@ -105,14 +124,22 @@ cmd_up() {
   echo "==> 1/5 Preconditions"; preconditions; echo "    ok"
   echo "==> 2/5 Copy infra/ to $STACK"; copy_infra; echo "    done"
   echo "==> 3/5 Start or update the stack"
+  local svc changed=()
+  for svc in "${STAMPED[@]}"; do [ "$(inputs_digest "$svc")" = "$(cat "$STACK/.stamp-$svc" 2>/dev/null)" ] || changed+=("$svc"); done
   compose up -d --quiet-pull 2>&1 | sed 's/^/    /'
+  # Compose does not see a changed certificate, account list or start script behind a bind mount.
+  if [ "${#changed[@]}" -gt 0 ]; then
+    echo "    recreating, their certificates, accounts or start scripts changed: ${changed[*]}"
+    compose up -d --no-deps --force-recreate "${changed[@]}" 2>&1 | sed 's/^/    /'
+  fi
   echo "==> 4/5 Wait until postgres, redis and qdrant are healthy"
   wait_healthy || die "the data stack is not healthy"
   echo "    healthy"
   echo "==> 5/5 The backend's role and database"
   init_postgres; echo "    gmshield_backend owns gmshield"
+  for svc in "${STAMPED[@]}"; do inputs_digest "$svc" > "$STACK/.stamp-$svc"; done
   if docker network inspect "$OLD_NETWORK" >/dev/null 2>&1 &&
-     [ "$(docker network inspect -f '{{len .Containers}}' "$OLD_NETWORK")" = 0 ]; then
+     [ -z "$(docker ps -a -q --filter "network=$OLD_NETWORK")" ]; then   # stopped containers count too
     docker network rm "$OLD_NETWORK" >/dev/null && echo "    removed the empty network $OLD_NETWORK"
   fi
   echo "DONE: check it with: bash tests/stack_check.sh"

@@ -74,8 +74,11 @@ unit_env() {     # unit_env <name>: the value systemd gives Ollama (the last ass
 }
 
 # ---------- steps ----------
-c_model() { local m; m=$(models) || return 1; [ -n "$m" ] && ! grep -qxF "$DROP_MODEL" <<<"$m"; }
-a_model() { OLLAMA_HOST=$(api) ollama rm "$DROP_MODEL"; }
+c_model() { local m; m=$(models) || return 1; ! grep -qxF "$DROP_MODEL" <<<"$m"; }   # readable, and not listed
+a_model() {
+  local m; m=$(models) || die "Ollama does not answer at $(api)"
+  if grep -qxF "$DROP_MODEL" <<<"$m"; then OLLAMA_HOST=$(api) ollama rm "$DROP_MODEL"; fi
+}
 
 c_allow() { local r; r=$(ufw_rules) || return 1; grep -qE "^$GATEWAY $PORT/tcp on $NETWORK +ALLOW( IN)? +$SUBNET( |$)" <<<"$r"; }
 a_allow() {   # first, so the existing "deny 11434/tcp" below it never wins

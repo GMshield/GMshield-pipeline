@@ -147,6 +147,22 @@ class SecureOllamaTest(unittest.TestCase):
         self.assertIn("[  --] 2 Allow", res.stdout)
         self.assertIn("[  --] 3 Remove the ufw rule", res.stdout)
 
+    def test_a_model_list_without_qwen_counts_as_done(self):
+        for models in ([], ["embeddinggemma:300m"]):
+            st = self.st(); st["models"] = models; self.state.write_text(json.dumps(st))
+            res = self.run_script("plan")
+            self.assertIn("[done] 1 Remove", res.stdout)
+        self.apply_ok()
+        self.assertFalse([c for c in self.log.read_text().splitlines() if c.startswith("ollama rm")])
+
+    def test_an_unreachable_ollama_never_counts_as_done(self):
+        st = self.st(); st["listening"] = []; self.state.write_text(json.dumps(st))
+        res = self.run_script("plan")
+        self.assertIn("[  --] 1 Remove", res.stdout)
+        res = self.run_script("apply")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAILED at step 1", res.stderr)
+
     def test_status_reports_every_step(self):
         self.apply_ok()
         res = self.run_script("status")

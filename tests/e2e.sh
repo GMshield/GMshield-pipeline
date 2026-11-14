@@ -15,12 +15,18 @@ git clone -q "$UP" "$WC" 2>/dev/null
 cp -r "$HERE/fixtures/sample-app/." "$WC/"
 G() { git -C "$WC" -c user.name=e2e -c user.email=e2e@localhost "$@"; }
 G add -A; G commit -qm "sample app"; G push -q origin HEAD:main HEAD:develop
+# The sample's production network: user-defined (container names resolve, for the probe and ZAP) and
+# not internal (the sample publishes 127.0.0.1:18080). Removed at the end.
+NET=gmshield-e2e
+cleanup_net() { docker rm -f gmshield-sample gmshield-sample-previous >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+trap cleanup_net EXIT
+docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
 
 cat > "$T/repos.toml" <<EOF
 org = "local-e2e"
 branches = ["develop", "main"]
 registry = "localhost:5000"
-prod_network = "bridge"            # the sample publishes 127.0.0.1:18080: not an internal network
+prod_network = "$NET"
 ci_slice = "ci.slice"
 [[repo]]
 name = "GMshield-sample"

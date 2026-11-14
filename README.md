@@ -319,11 +319,24 @@ ufw (inserted above the existing deny) and removes the old `172.16.0.0/12` rule,
 moves to `/var/lib/gmshield/secure-ollama/`), points `/usr/local/bin/ai-healthcheck` at the new address
 and restarts Ollama. An SSH tunnel to Ollama must now target `172.30.5.1:11434`.
 
-First deploy, in order: `bash deploy/certs.sh issue`, `bash deploy/data-credentials.sh` (then add
-`GMSHIELD_ANTHROPIC_API_KEY` to `secrets/worker.env` by hand), `bash deploy/stack.sh up`,
-`sudo bash deploy/secure-ollama.sh apply`, `bash tests/stack_check.sh` (every row of the story's I/O
-matrix against the live stack; `tests/stack_trial.sh [backend image]` runs the same checks against a
-throwaway copy of the stack).
+First deploy, in order (on roberto-server, as roberto, unless it says otherwise):
+
+1. `bash deploy/certs.sh issue`
+2. `bash deploy/data-credentials.sh`
+3. Add `GMSHIELD_ANTHROPIC_API_KEY=<key>` by hand to `~/gmshield-ci/secrets/worker.env` (mode 600 stays);
+   the worker refuses to start without it.
+4. `bash deploy/stack.sh up` (also after `certs.sh issue --renew` or a new account list: it recreates
+   each service whose certificates, accounts or start script changed since the last successful `up`)
+5. `sudo bash deploy/secure-ollama.sh apply`
+6. On the workstation: in `~/.ssh/config`, change the Ollama forward of `roberto-server` to
+   `LocalForward 11434 172.30.5.1:11434` (Ollama no longer listens on 127.0.0.1).
+7. `bash tests/stack_check.sh`: every row of the story's I/O matrix against the live stack
+   (`tests/stack_trial.sh [backend image]` runs the same checks against a throwaway copy of the stack).
+
+The apps publish no host port. To reach one by hand, use its address on `gmshield-app` from the server
+(`curl http://$(docker inspect -f '{{(index .NetworkSettings.Networks "gmshield-app").IPAddress}}'
+gmshield-backend):8080/actuator/health`), or from the workstation forward to that address
+(`ssh -N -L 8080:<that address>:8080 roberto-server`; the frontend likewise on port 3000).
 
 ## Setup
 

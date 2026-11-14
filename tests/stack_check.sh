@@ -129,6 +129,19 @@ if [ -n "$PG_IP" ]; then
   expect refused "postgres: a host name the certificate does not name ($PG_IP)" \
     psql_on data "$CA" "host=$PG_IP port=5432 dbname=gmshield user=gmshield_backend sslmode=verify-full" "select 1"
 else fail "postgres: cannot find its address on ${NET}data"; fi
+# The server certificates name the service, not its address: a client verifying the host name
+# refuses them by IP. curl does the TLS handshake (exit 60 = certificate rejected) before any protocol.
+tls_by() {   # tls_by <container> <port>: curl's exit code connecting by IP with the right authority
+  local ip; ip=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${NET}work\").IPAddress}}" "$PFX$1" 2>/dev/null)
+  [ -n "$ip" ] || { echo none; return; }
+  docker run --rm --network "${NET}work" -v "$CA:/ca.crt:ro" --entrypoint curl "$CURL_IMAGE" \
+    -sS -o /dev/null -m 8 --cacert /ca.crt "https://$ip:$2/" >/dev/null 2>&1; echo $?
+}
+for c in "redis 6379" "qdrant 6333"; do
+  rc=$(tls_by $c)
+  [ "$rc" = 60 ] && pass "${c% *}: a host name the certificate does not name (its IP)" ||
+    fail "${c% *}: connecting by IP was not refused by the certificate check (curl exit $rc)"
+done
 REDISCLI_AUTH=$B_REDIS
 reply_has PONG rcli "$CA" --user backend PING && fail "redis: plain TCP answered" || pass "redis: plain TCP"
 reply_has PONG rcli "$TMP/other.crt" --tls --cacert /ca.crt --user backend PING && fail "redis: another authority accepted" ||
@@ -162,12 +175,15 @@ if docker network inspect gmshield-model >/dev/null 2>&1; then
     pass "ollama starts after Docker" || fail "ollama does not start after Docker"
   tags=$(docker run --rm --network gmshield-model --entrypoint curl "$CURL_IMAGE" -sS -m 8 "http://$OLLAMA/api/tags" 2>/dev/null)
   case $tags in *embeddinggemma*) pass "ollama: reachable from gmshield-model" ;; *) fail "ollama: not reachable from gmshield-model" ;; esac
-  case $tags in *qwen3.5*) fail "ollama: qwen3.5:4b is still installed" ;; *embeddinggemma*) pass "ollama: only embeddinggemma:300m" ;; esac
-  for n in work data app; do
+  case $tags in *qwen3.5*) fail "ollama: qwen3.5:4b is still installed" ;; *embeddinggemma*) pass "ollama: only embeddinggemma:300m" ;;
+               *) fail "ollama: model list unreadable" ;; esac
+  for n in work data app edge outbound registry; do
     expect refused "ollama: refused from gmshield-$n" docker run --rm --network "gmshield-$n" --entrypoint curl "$CURL_IMAGE" \
       -sS -m 8 "http://$OLLAMA/api/version"
   done
-  expect refused "ollama: not on the LAN address" curl -sS -m 5 "http://$(ip -4 -o route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):11434/api/version"
+  lan=$(ip -4 -o route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  if [ -n "$lan" ]; then expect refused "ollama: not on the LAN address $lan" curl -sS -m 5 "http://$lan:11434/api/version"
+  else fail "ollama: cannot find the server's LAN address"; fi
 else skip "ollama rows: the production network gmshield-model does not exist"; fi
 
 section "Expiring certificate: check and deploy warn, exit 0"
