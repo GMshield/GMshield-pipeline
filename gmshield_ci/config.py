@@ -77,7 +77,7 @@ def load_settings() -> Settings:
         home=home, org=org,
         branches=tuple(cfg.get("branches", ["develop", "main"])),
         registry=cfg.get("registry", "localhost:5000"),
-        prod_network=cfg.get("prod_network", "rpg_default"),
+        prod_network=cfg.get("prod_network", "gmshield-app"),
         ci_slice=cfg.get("ci_slice", "ci.slice"),
         repos=repos, images=tools["images"],
         semgrep_rulesets=tools.get("semgrep", {}).get("rulesets", ["p/default"]),
