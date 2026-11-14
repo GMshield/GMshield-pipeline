@@ -201,13 +201,70 @@ The local mirrors in `~/gmshield-ci/mirrors/` are force-synced on every poll, so
 and `main` always equal GitHub's. Only `develop` and `main` are ever built; pull requests and forks
 are not, so no outside code runs on the server.
 
+## Encrypted volume (AD-24)
+
+Everything persistent on roberto-server lives on one LUKS2 volume that the TPM unlocks at boot, so a
+removed disk exposes nothing: `/var/lib/gmshield/volume.luks`, a 150 GiB container file on the root
+filesystem, mounted at `/srv/gmshield`. Its subfolders are bind-mounted back onto the old paths, so
+nothing else changes (not Docker, not Compose, not the pipeline's `install_id`):
+
+| Path | Volume subfolder |
+|---|---|
+| `/var/lib/docker` (named volumes: Postgres, Redis, Qdrant, registry, SonarQube) | `docker` |
+| `/var/lib/containerd` (image layers) | `containerd` |
+| `~/gmshield-ci` (secrets, certificates, state, work, artifacts, cache, mirrors, runner) | `gmshield-ci` |
+| `~/stack` (data stack Compose file and `.env`) | `stack` |
+| `~/.config/gmshield` (GitHub token) | `config-gmshield` |
+
+Swap is a 4 GiB logical volume (`ubuntu-vg/gmshield_swap`) encrypted with a new random key at each
+boot (`/dev/mapper/cryptswap`); `/swap.img` is gone. Boot never depends on the volume (`nofail`), but
+Docker, containerd, `gmshield-ci` and `gmshield-dashboard` carry `RequiresMountsFor=` drop-ins, so they
+never start on empty folders: if the volume does not unlock, SSH still comes up and they stay down.
+
+Run it once, from a checkout on the server, directly in the terminal (not through `tee` or a logger:
+the recovery key is printed once):
+
+1. `bash deploy/encrypt-volume.sh plan` changes nothing; with `sudo` it also measures the stores.
+2. `sudo bash deploy/encrypt-volume.sh setup` shows where the volume goes and the space it uses, asks
+   for `yes`, prints the recovery key and asks for `saved`, then stops the CI, the dashboard, every
+   container, Docker and containerd, copies the stores, bind-mounts them and starts everything again.
+   The originals stay under `<path>.plain`. Add `--dry-run` to print every command instead.
+3. Reboot.
+4. `sudo bash deploy/encrypt-volume.sh status`, then `sudo bash deploy/encrypt-volume.sh finish`: it
+   checks that the TPM unlocked the volume at this boot and that every bind mount, the encrypted swap
+   and the data stack are up; only then it deletes the `.plain` copies and `/swap.img` and trims the
+   free blocks (plain-text blocks may still remain in the SSD's spare area).
+
+Every step checks first whether it is already done, so after `FAILED at step N` fix the cause and run
+the same command again. A failed copy leaves the originals in place and restarts the services on them.
+
+**Reading `status`:** `[done]` or `[  --]` for each setup and finish step; then the volume (open, key
+slots, mount), each bind mount, the swap and the data stack; then the finish checks, `all pass` or
+each failing one by name. After setup and a reboot expect: key slots `recovery tpm2`, every bind mount
+active, encrypted swap active, postgres and redis healthy, qdrant and registry up.
+
+**Recovery key:** the TPM slot is bound to no PCRs (the laptop boots in legacy BIOS, where PCRs add
+breakage without protection), so the volume opens on this machine by itself: it protects a removed
+disk, not a stolen laptop. If the TPM ever fails to unlock it (TPM cleared, board replaced, disk moved),
+Docker stays down; open the volume with the recovery key, which `cryptsetup` accepts as a passphrase:
+
+```bash
+sudo cryptsetup open /var/lib/gmshield/volume.luks gmshield     # type the recovery key
+sudo mount -a && sudo systemctl start containerd docker gmshield-dashboard gmshield-ci.timer
+# put a working TPM slot back (asks for the recovery key again):
+sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs= /var/lib/gmshield/volume.luks
+```
+
+The container file can grow later without downtime: `fallocate` it to the larger size, then
+`sudo cryptsetup resize gmshield` and `sudo resize2fs /dev/mapper/gmshield`.
+
 ## Setup
 
 1. `sudo bash deploy/install-server.sh` (Docker buildx, `ci.slice`, the poller service and timer).
 2. Clone this repo to `~/gmshield-ci/runner`; copy `sonarqube/compose.yaml` to
    `~/gmshield-ci/sonarqube/` with a `.env` holding `SONAR_DB_PASSWORD`; run
    `python3 -m gmshield_ci sonar-setup`, then `python3 -m gmshield_ci selftest`.
-3. Tests: `python3 -m unittest -v` (gates and parsers), `bash tests/e2e.sh` (full pipeline against a
+3. Tests: `python3 -m unittest -v` (gates, parsers and `encrypt-volume.sh` against stubs), `bash tests/e2e.sh` (full pipeline against a
    throwaway local repo, about 30 minutes).
 
 Pinned tool versions and digests: [`tools.toml`](tools.toml). Watched repositories: [`repos.toml`](repos.toml).
