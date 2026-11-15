@@ -33,7 +33,7 @@ STAGES = {
                 ("secrets", "Secr", "Gitleaks"), ("sca_iac:sca", "SCA", "Trivy deps"),
                 ("sca_iac:iac", "IaC", "Trivy IaC"), ("sast", "Semg", "Semgrep"),
                 ("sonar", "Sonr", "SonarQube"), ("image", "Img", "image"), ("integration_tests", "Intg", "integration tests"),
-                ("dast", "DAST", "ZAP active")],
+                ("dast", "DAST", "ZAP active"), ("nfr1", "NFR1", "known text at rest")],
     "main": [("resolve", "Res", "resolve"), ("promotion", "Prom", "passed develop"), ("image", "Img", "image"),
              ("publish", "Publ", "registry"), ("deploy", "Depl", "deploy"), ("dast_prod", "DAST", "ZAP passive"),
              ("release", "Rel", "release")],

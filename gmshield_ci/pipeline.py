@@ -152,7 +152,7 @@ def _passed(run: Run) -> bool:
 # ------------------------------------------------------------------ flows
 
 def develop_flow(run: Run) -> None:
-    """develop: unit tests + SAST + secrets + SCA/IaC, image build+scan, active DAST, then the gate."""
+    """develop: unit tests + SAST + secrets + SCA/IaC, image build+scan, active DAST and NFR-1, then the gate."""
     if run.mode == "light":
         run.log_opts = f"{run.sha}^!"
         _source_checks(run, with_tests=False)
@@ -164,6 +164,8 @@ def develop_flow(run: Run) -> None:
         stages.execute(run, "image", "Container image (build, SBOM & scan)", "image", stages.image)
         stages.execute(run, "integration_tests", "Integration tests", None, stages.integration_tests)
         stages.execute(run, "dast", "DAST (OWASP ZAP, active, staging)", "dast_develop", stages.dast_staging)
+        if not any(r.key == "nfr1" for r in run.records):   # the staging session records it when it runs
+            stages.execute(run, "nfr1", stages.NFR1_TITLE, "nfr1", stages.nfr1_not_run)
     run.result = "passed" if _passed(run) else "failed"
     if run.mode == "full" and run.result == "passed":
         promos = _read(run.s.state_dir / "promotions.json", {})

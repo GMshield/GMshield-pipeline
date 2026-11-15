@@ -41,6 +41,23 @@ def capture(cmd: list[str], timeout: int = 120) -> tuple[int, str]:
         return 124, ""
 
 
+def capture_to(cmd: list[str], dest: Path, log: Path | None = None, timeout: int = 600) -> int:
+    """Run a command with its standard output written to `dest` (binary, as it is) and its errors
+    appended to `log`. Returns the exit code, 124 on timeout."""
+    err = open(log, "ab") if log else subprocess.DEVNULL
+    try:
+        if log:
+            err.write(f"\n$ {' '.join(cmd)} > {dest.name}\n".encode())
+            err.flush()
+        with open(dest, "wb") as out:
+            return subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        return 124
+    finally:
+        if log:
+            err.close()
+
+
 class Docker:
     def __init__(self, ci_slice: str, run_id: str, instance: str):
         self.ci_slice = ci_slice

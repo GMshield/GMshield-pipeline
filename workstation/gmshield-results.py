@@ -43,7 +43,7 @@ MARK = {"passed": "PASS", "failed": "FAIL", "skipped": "skip", "blocked": "BLOCK
 TESTS = {  # test name -> pipeline stage keys (develop and main share names where they mean the same)
     "unit-tests": ["unit_tests"], "secrets": ["secrets"], "semgrep": ["sast"], "sca": ["sca_iac:sca"],
     "iac": ["sca_iac:iac"], "sonarqube": ["sonar"], "image": ["image"],
-    "integration-tests": ["integration_tests"], "dast": ["dast", "dast_prod"],
+    "integration-tests": ["integration_tests"], "dast": ["dast", "dast_prod"], "nfr1": ["nfr1"],
     "promotion": ["promotion"], "publish": ["publish"], "deploy": ["deploy"], "release": ["release"],
 }
 VERDICT = {

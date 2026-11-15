@@ -6,12 +6,15 @@
 #   ~/stack/.env                       the stack's own secrets: POSTGRES_PASSWORD (superuser rpg, local
 #                                      socket only), REDIS_PROBE_PASSWORD (health check, PING only),
 #                                      QDRANT_API_KEY (Qdrant's one key)
-#   ~/gmshield-ci/secrets/backend.env  Postgres role gmshield_backend (TLS, verify-full) and Redis account backend
+#   ~/gmshield-ci/secrets/backend.env  Postgres role gmshield_backend (TLS, verify-full), Redis account backend,
+#                                      and the vault's master and index keys (Story 1.7, AD-19)
 #   ~/gmshield-ci/secrets/worker.env   Redis account worker and the Qdrant key (used from Story 1.12 / Epic 2)
 #   ~/gmshield-ci/secrets/frontend.env the backend's address on gmshield-app
 #   ~/stack/redis-users.acl            Redis accounts with SHA-256 hashes of the passwords above
-# Every secret is 32 random bytes (64 hex characters), written once with mode 600, never printed.
-# A value already present is kept, even if it differs from what this script would write.
+# Every secret is 32 random bytes (64 hex characters; the two vault keys in Base64, as the backend reads
+# them), written once with mode 600, never printed. A value already present is kept, even if it differs
+# from what this script would write: a vault key must never change, or what it protects is lost.
+# The vault keys have no off-server copy yet (Epic 10): keep backend.env out of reach and intact.
 set -euo pipefail
 umask 077
 
@@ -43,6 +46,9 @@ put() {   # put <file> <key> <value>: append KEY=value (the file stays mode 600)
 secret() {   # secret <file> <key>: a new random value, once
   if has "$1" "$2"; then echo "    $2: already done"; else put "$1" "$2" "$(openssl rand -hex 32)"; echo "    $2: generated"; fi
 }
+key_b64() {  # key_b64 <file> <key>: a new random 32-byte key in Base64, once
+  if has "$1" "$2"; then echo "    $2: already done"; else put "$1" "$2" "$(openssl rand -base64 32)"; echo "    $2: generated"; fi
+}
 setting() {  # setting <file> <key> <value>: a plain setting, once
   local cur; cur=$(value "$1" "$2")
   if [ -z "$cur" ]; then put "$1" "$2" "$3"; echo "    $2: written"
@@ -72,6 +78,8 @@ setting "$B" GMSHIELD_REDIS_HOST redis
 setting "$B" GMSHIELD_REDIS_PORT 6379
 setting "$B" GMSHIELD_REDIS_USERNAME backend
 secret "$B" GMSHIELD_REDIS_PASSWORD
+key_b64 "$B" GMSHIELD_VAULT_MASTER_KEY
+key_b64 "$B" GMSHIELD_VAULT_INDEX_KEY
 
 W=$SECRETS/worker.env
 echo "==> 3/5 The worker ($W)"

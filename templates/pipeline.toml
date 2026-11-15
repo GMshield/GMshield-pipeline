@@ -76,6 +76,19 @@ services = []               # throwaway services, ready before the app starts: "
 # target = "stand-in-backend"
 # alias = "stand-in-backend"
 
+# [nfr1]
+# NFR-1 gate (develop, inside the staging session after ZAP, before teardown). Without this table the
+# gate is skipped. Needs [service].port. Both keys are required when the table is present.
+# The pipeline makes a random ASCII text for each run, then:
+#   POST <seed_path> {"text": "<text>"}            -> 2xx {"id": "<id>"}   (store it through the app)
+#   GET  <readback_path with {id} replaced>        -> 2xx JSON object whose every value is the text
+# and searches pg_dump, a Redis RDB (redis-cli --rdb), a copy of each [deploy].mounts target and every
+# log (app, services, companions) for the text: plain UTF-8; Base64 and Base64url at every alignment,
+# Base64 also with "/" escaped as "\/"; hex, lower and upper case.
+# Found anywhere, not seeded or not read back: the gate fails and names the store.
+# seed_path = "/internal/v1/test-mode/nfr1-probe"
+# readback_path = "/internal/v1/test-mode/nfr1-probe/{id}"
+
 [test]
 # Integration tests (develop, full run, after the image): this Dockerfile stage is built and run as a
 # container with GMSHIELD_MODE=test on an internal network beside the services; exit 0 passes.

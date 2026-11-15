@@ -157,6 +157,10 @@ class Contract:
     staging_env: dict = field(default_factory=dict)
     staging_services: list[str] = field(default_factory=list)
     companions: list[Companion] = field(default_factory=list)
+    # [nfr1] (Story 1.7): the NFR-1 gate seeds a known text through these routes in staging
+    nfr1: bool = False
+    nfr1_seed_path: str = ""      # POST {"text": ...} -> {"id": ...}
+    nfr1_readback_path: str = ""  # GET, with {id} replaced -> a JSON object whose every value is the text
     # [test]
     integration_target: str = ""  # Dockerfile stage run as integration tests; "" = stage skipped
     test_services: list[str] = field(default_factory=list)
@@ -289,6 +293,7 @@ def _parse(c: Contract, data: dict) -> None:
     svc, build = _table(data, "service"), _table(data, "build")
     dast, deploy = _table(data, "dast"), _table(data, "deploy")
     staging, test = _table(data, "staging"), _table(data, "test")
+    nfr1 = _table(data, "nfr1")
     name = svc.get("name", c.service)
     if not isinstance(name, str):
         raise ContractError("[service].name must be a string")
@@ -371,6 +376,32 @@ def _parse(c: Contract, data: dict) -> None:
 
     c.integration_target = _str(test, "test", "target", "", _NAME).lower()
     c.test_services = _services(test, "test")
+
+    if "nfr1" in data:
+        _nfr1(c, nfr1)
+
+
+NFR1_ID = "{id}"
+
+
+def _nfr1(c: Contract, t: dict) -> None:
+    """[nfr1]: both routes are required, and the gate runs in the staging copy (an HTTP port is needed)."""
+    unknown = set(t) - {"seed_path", "readback_path"}
+    if unknown:
+        raise ContractError(f"[nfr1]: unknown key {sorted(unknown)[0]!r} (known: seed_path, readback_path)")
+    for key in ("seed_path", "readback_path"):
+        if key not in t:
+            raise ContractError(f"[nfr1].{key} is required")
+    c.nfr1_seed_path = _url_path(t, "nfr1", "seed_path")
+    readback = t["readback_path"]
+    if not isinstance(readback, str) or readback.count(NFR1_ID) != 1 or \
+            not _URL_PATH.fullmatch(readback.replace(NFR1_ID, "id")):
+        raise ContractError(f"[nfr1].readback_path = {readback!r}: a URL path with {NFR1_ID} once, "
+                            "e.g. \"/internal/v1/probe/{id}\"")
+    c.nfr1_readback_path = readback
+    if not c.http:
+        raise ContractError("[nfr1] needs [service].port: the gate seeds through the staging copy's HTTP routes")
+    c.nfr1 = True
 
 
 def load_contract(src: Path, repo_name: str) -> Contract:

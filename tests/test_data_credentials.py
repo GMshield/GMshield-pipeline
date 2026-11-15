@@ -2,6 +2,7 @@
 
 Run: python3 -m unittest tests.test_data_credentials -v
 """
+import base64
 import hashlib
 import os
 import re
@@ -61,6 +62,25 @@ class DataCredentialsTest(unittest.TestCase):
         self.assertEqual(env_file(self.base / "stack/.env")["QDRANT_API_KEY"],
                          env_file(self.base / "gmshield-ci/secrets/worker.env")["GMSHIELD_QDRANT_API_KEY"])
         self.assertEqual((self.base / "gmshield-ci/secrets").stat().st_mode & 0o777, 0o700)
+
+    def test_vault_keys_are_32_random_bytes_in_base64_distinct_and_never_printed(self):
+        res = self.ok()
+        b = env_file(self.base / "gmshield-ci/secrets/backend.env")
+        keys = [b["GMSHIELD_VAULT_MASTER_KEY"], b["GMSHIELD_VAULT_INDEX_KEY"]]
+        for k in keys:
+            self.assertEqual(len(base64.b64decode(k, validate=True)), 32)
+            self.assertNotIn(k, res.stdout + res.stderr)
+        self.assertNotEqual(keys[0], keys[1])
+        self.assertIn("GMSHIELD_VAULT_MASTER_KEY: generated", res.stdout)
+
+    def test_an_existing_vault_key_is_never_replaced(self):
+        b = self.base / "gmshield-ci/secrets/backend.env"
+        b.parent.mkdir(parents=True)
+        kept = base64.b64encode(bytes(range(32))).decode()
+        b.write_text(f"GMSHIELD_VAULT_MASTER_KEY={kept}\n")
+        res = self.ok()
+        self.assertEqual(env_file(b)["GMSHIELD_VAULT_MASTER_KEY"], kept)
+        self.assertIn("GMSHIELD_VAULT_MASTER_KEY: already done", res.stdout)
 
     def test_backend_settings_use_its_own_accounts_and_verified_tls(self):
         self.ok()

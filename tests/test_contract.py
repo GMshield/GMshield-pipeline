@@ -497,7 +497,8 @@ class RuntimeTest(unittest.TestCase):
             s=s, contract=c, id=RUN_ID, sha=SHA, dir=d, work=self.tmp / "work", src=self.tmp / "src",
             docker=FakeDocker(), local_image=f"gmshield-ci/api:{SHA}", prod_image=f"localhost:5000/gmshield-api:{SHA}",
             prod_name="gmshield-api", image_built=True, deployed=False, rolled_back=False, previous_image=None,
-            previous_kept=False, previous_running=False, repo=types.SimpleNamespace(url="file:///x"))
+            previous_kept=False, previous_running=False, repo=types.SimpleNamespace(url="file:///x"),
+            log=lambda msg: None, lock=__import__("threading").Lock(), records=[], titles={})
 
     def docker_cmds(self, verb):
         return [c for c in self.cmds if c[:2] == ["docker", verb]]
@@ -864,7 +865,7 @@ class FlowTest(unittest.TestCase):
         with mock.patch.object(pipeline, "_source_checks", lambda *a, **k: None), \
                 mock.patch.object(pipeline.stages, "execute", lambda run, key, *a: order.append(key) or []):
             pipeline.develop_flow(run)
-        self.assertEqual(order, ["sonar", "image", "integration_tests", "dast"])
+        self.assertEqual(order, ["sonar", "image", "integration_tests", "dast", "nfr1"])
 
 
 class MainFlowTest(unittest.TestCase):
