@@ -157,8 +157,6 @@ class StagingCheckTest(unittest.TestCase):
 
     def fake_sh(self, cmd, log=None, timeout=600, env=None, cwd=None):
         self.cmds.append(cmd)
-        if cmd[:2] == ["docker", "cp"]:
-            Path(cmd[3]).write_bytes(self.content["rdb"])
         if cmd[:2] == ["docker", "exec"] and "--rdb" in cmd:
             return self.rc.get("rdb", 0)
         return 0
@@ -171,7 +169,7 @@ class StagingCheckTest(unittest.TestCase):
 
     def fake_capture_to(self, cmd, dest, log=None, timeout=600):
         self.cmds.append(cmd)
-        kind = "pg" if "pg_dump" in cmd else "volume"
+        kind = "pg" if "pg_dump" in cmd else "rdb" if "cat" in cmd else "volume"
         Path(dest).write_bytes(self.content[kind])
         return self.rc.get(kind, 0)
 
@@ -241,6 +239,15 @@ class StagingCheckTest(unittest.TestCase):
         self.assertLess(max(pg, rdb, vol), teardown)
         self.assertEqual(self.cmds[pg][:3], ["docker", "exec", f"gmshield-ci-{RUN_ID}-staging-postgres"])
         self.assertEqual(self.cmds[vol][2], f"gmshield-ci-{RUN_ID}-app:/var/lib/gmshield/files")
+
+    def test_the_redis_dump_stays_in_redis_own_data_folder(self):
+        # SonarQube S5443: never a publicly writable directory such as /tmp.
+        self.nfr1(self.run_for())
+        redis = f"gmshield-ci-{RUN_ID}-staging-redis"
+        self.assertIn(["docker", "exec", redis, "redis-cli", "--rdb", "/data/gmshield-nfr1.rdb"], self.cmds)
+        self.assertIn(["docker", "exec", redis, "cat", "/data/gmshield-nfr1.rdb"], self.cmds)
+        self.assertFalse(any("/tmp" in part for c in self.cmds for part in c if isinstance(part, str)
+                             and "gmshield-nfr1" in part))
 
     def test_planted_plaintext_fails_the_gate_and_names_the_store(self):
         planted = {"pg": ("INSERT ... '" + TEXT + "'").encode(),
