@@ -18,6 +18,9 @@ push to develop ──► Resolve flow
                     ► Integration tests      (optional [test].target stage beside throwaway services)
                     ► DAST, active           (OWASP ZAP against a throwaway copy in an isolated network,
                                               GMSHIELD_MODE=test, beside its throwaway services)
+                    ► NFR-1 at rest          (same session, before teardown: a random known text stored
+                                              through [nfr1], read back, then searched for in pg_dump,
+                                              a Redis RDB, each mounted volume and every log)
                     ► Quality gate ──pass──► code is promotable (recorded by its git tree)
                                              + GitHub status gmshield-ci/develop = success
 
@@ -41,7 +44,8 @@ repository, "deploy" on `main` means the runner updates itself (after the new co
 Defined in [`gates.toml`](gates.toml). Defaults: no leaked secrets; no high-severity Semgrep findings
 (medium <= 25); SonarQube quality gate OK; no fixable critical or high CVEs in dependencies or the
 image; no critical or high Dockerfile misconfigurations; DAST high = 0 (medium <= 5 on develop,
-<= 10 in production); failing unit tests always block. A scanner that crashes or times out blocks
+<= 10 in production); NFR-1: the run's known text is seeded, read back, and found in no store or
+log (repositories without `[nfr1]` skip it); failing unit tests always block. A scanner that crashes or times out blocks
 the commit (fail closed). Reviewed false positives are suppressed in the app repo
 (`.gitleaksignore`, `nosemgrep`, `.trivyignore`, `.gmshield/zap-ignore.txt`, or "Safe" in SonarQube),
 never by loosening the gates.
@@ -50,7 +54,7 @@ never by loosening the gates.
 uses syntax newer than its parser (in Java 25: `import module` and statements before `super()`).
 Findings in that code may be missing, so the run reports a warning for each such file, with the lines
 when Semgrep gives them. A warning never changes the result: it appears in the SAST result,
-`summary.md`, `RELEASE.md`, the GitHub status and `gmshield-results` (column `Warn`).
+`summary.md`, the artifacts index, `RELEASE.md` and the GitHub status.
 
 ### SonarQube and the human decision
 
@@ -64,7 +68,7 @@ SonarQube, then re-run the branch. Coverage (>= 80%) is listed but disabled unti
 ssh -N -o ExitOnForwardFailure=no -L 9000:127.0.0.1:9000 roberto-server   # then http://localhost:9000
 # start it if the pipeline is not running it: cd ~/gmshield-ci/sonarqube && docker compose up -d
 # admin password: ~/gmshield-ci/sonarqube/credentials.env on roberto-server
-gmshield-results -b develop -r backend --rerun      # from the workstation, after the review
+ssh -o ClearAllForwardings=yes roberto-server 'cd ~/gmshield-ci/runner && python3 -m gmshield_ci run backend develop'   # after the review
 ```
 
 SonarQube (26.10 Community Build + PostgreSQL 17, [`sonarqube/compose.yaml`](sonarqube/compose.yaml))
@@ -119,6 +123,7 @@ these options existed. The template documents each option and its default; in sh
 | `[staging]` | `env` | Added over `[deploy].env` in staging only |
 | | `services` | `postgres` and/or `redis`, started on the run's internal network under those names and ready (`pg_isready`, `redis-cli ping`) before the app starts |
 | | `companions` | `[[staging.companions]] target, alias`: that Dockerfile stage (it must exist) is built and run beside the app as a stand-in, with `GMSHIELD_MODE=test` but without the contract's limits and hardening |
+| `[nfr1]` | `seed_path`, `readback_path` | NFR-1 gate (Story 1.7), develop, inside the staging session after ZAP and before teardown. The pipeline makes a random ASCII text, `POST`s `{"text": ...}` to `seed_path` (answer: `{"id": ...}`), `GET`s `readback_path` with `{id}` replaced (answer: a JSON object whose every value is the text), then copies the stores (`pg_dump`, `redis-cli --rdb` with RDB compression off, `docker cp` of each `[deploy].mounts` target) and the logs (app, services, companions) into the run's work folder and searches them for the text (ASCII letters, digits and hyphens) in plain UTF-8; Base64 and Base64url at every alignment, Base64 also with `/` escaped as `\/`; and hex in lower and upper case. Found anywhere, not seeded or not read back: the gate fails and names the store. A store that cannot be copied is an error, which still names the stores the text was already found in. `nfr1/nfr1.json` lists every store searched with its size (never the text). Needs `[service].port`. Without the table: skipped. |
 | `[test]` | `target`, `services` | Integration tests on develop (full run, after the image): the stage (it must exist) runs on an internal network beside its services, exit 0 passes, limit `limits.integration_tests` (1800 s). No target: skipped. |
 
 Env keys (`[deploy].env`, `[staging].env`) must be variable names (`[A-Za-z_][A-Za-z0-9_]*`).
@@ -151,24 +156,15 @@ JSON + SARIF, SonarQube JSON, Trivy JSON, CycloneDX SBOMs for source and image, 
 HTML/JSON/Markdown/XML, build and test logs). `artifacts/README.md` indexes all runs;
 `releases/<tag>/` records each production release.
 
-On the workstation, results are fetched by hand with
-[`workstation/gmshield-results.py`](workstation/gmshield-results.py) (installed as `gmshield-results`;
-nothing is scheduled). Each call fetches new runs (raw copies kept in `~/.cache/gmshield/artifacts`)
-and files every run as one release folder in `~/agentic-RPG/docs`, separated by branch:
-
-```
-ci-cd/develop/release-develop-<YYYYMMDDTHHMMSSZ>/   RELEASE.md, release.json, artifacts/
-ci-cd/main/release-main-<YYYYMMDDTHHMMSSZ>/         RELEASE.md, release.json, artifacts/
-```
+Results stay on roberto-server; nothing is copied to the workstation. Read them over SSH
+(`ssh -o ClearAllForwardings=yes roberto-server '<command>'`, from `~/gmshield-ci/artifacts`):
 
 | Command | Shows |
 |---|---|
-| `gmshield-results` | the latest result of every repo and branch |
-| `gmshield-results -b develop` | the most recent develop run of every repo, test by test |
-| `gmshield-results -b main -r backend` | the most recent main run of one repo |
-| `gmshield-results -b develop -t sonarqube` | one test (names: `--tests`), with threshold and report paths |
-| `gmshield-results --list` / `--release <folder>` | every release folder / one past run |
-| `gmshield-results -b develop -r backend --rerun` | re-runs it on the server first |
+| `cat README.md` | the latest result of every repo and branch, and the 40 most recent runs |
+| `cat GMshield-backend/develop/latest/summary.md` | the most recent run of one repo and branch, test by test |
+| `ls GMshield-backend/develop` | every run of one repo and branch (folder `<YYYYMMDD-HHMMSS>-<sha>`, UTC) |
+| `scp -r roberto-server:gmshield-ci/artifacts/GMshield-backend/develop/latest/dast .` | one report folder, when it is needed locally |
 
 `docs/CI-CD-RESULTS.md` in the workspace lists the command for every test on both branches.
 
@@ -180,7 +176,7 @@ full run (PASSED, FAILED or BLOCKED) with one column per pipeline stage (`ok`, `
 when the stage never ran), then what blocked it with the gate's reason, the run in progress with its
 last log line, and the branch's most recent runs; the `main` section also shows the newest release. It redraws every 5 seconds from
 `state/` and `artifacts/` only: it never takes the poll lock, calls GitHub or writes anything.
-Detailed reports still come through `gmshield-results`.
+Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 
 - Install once: `sudo bash deploy/install-dashboard.sh` (service `gmshield-dashboard`; the login
   prompt moves to tty2, Ctrl+Alt+F2). Times are shown in `America/Sao_Paulo`; set `DASH_TZ` to change.
@@ -299,7 +295,9 @@ host port.
 
 **Credentials (AD-23).** `bash deploy/data-credentials.sh` writes each secret once (32 random bytes,
 mode 600, never printed; a rerun says `already done`): the stack's own in `~/stack/.env`, the clients'
-in `~/gmshield-ci/secrets/<service>.env`, and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+in `~/gmshield-ci/secrets/<service>.env` (the backend's include `GMSHIELD_VAULT_MASTER_KEY` and
+`GMSHIELD_VAULT_INDEX_KEY`, Base64, Story 1.7: an existing vault key is never replaced, since data
+encrypted under it would be lost; no off-server copy exists until Epic 10), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
 hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
 the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
 rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING

@@ -1,15 +1,18 @@
 """Pipeline stages. Each returns (outcome, metrics, files, detail); outcome is ok | error | skipped."""
 from __future__ import annotations
 
+import base64
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from secrets import token_hex   # not `import secrets`: secrets() is the Gitleaks stage below
 from typing import TYPE_CHECKING
 
 from . import gates
-from .config import RUNNER_DIR, container_args, volume_name
-from .dockerops import UID, capture, container_healthy, container_logs, inspect, sh
+from .config import NFR1_ID, RUNNER_DIR, container_args, volume_name
+from .dockerops import UID, capture, capture_to, container_healthy, container_logs, inspect, sh
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import Run
@@ -278,7 +281,9 @@ SERVICE_SPECS = {
                  "args": [], "tmpfs": "/var/lib/postgresql",
                  # over TCP: the image's temporary init server listens on the socket only
                  "ready": ["pg_isready", "-h", "127.0.0.1", "-U", "gmshield", "-d", "gmshield"], "expect": ""},
-    "redis": {"env": {}, "args": ["redis-server", "--save", "", "--appendonly", "no"], "tmpfs": "/data",
+    # rdbcompression off: the NFR-1 gate searches an RDB, where LZF would split a plain value.
+    "redis": {"env": {}, "args": ["redis-server", "--save", "", "--appendonly", "no", "--rdbcompression", "no"],
+              "tmpfs": "/data",
               "ready": ["redis-cli", "ping"], "expect": "PONG"},
 }
 
@@ -455,6 +460,12 @@ def dast_staging(run: "Run"):
         result = _zap(run, net, f"{scheme}://app:{c.port}", outdir, active=True)
         container_logs(app, outdir / "app.log")
         result[2].append("dast/app.log")
+        if c.nfr1:   # inside the session, before the teardown below; recorded as its own stage
+            n = len(c.staging_services)
+            session = StagingSession(net=net, base=f"{scheme}://app:{c.port}", app=app, ca=ca,
+                                     services=dict(zip(c.staging_services, containers[:n])),
+                                     companions=dict(zip([x.alias for x in c.companions], containers[n:])))
+            execute(run, "nfr1", NFR1_TITLE, "nfr1", nfr1_check, session)
         return result
     finally:
         _remove(app, *containers)
@@ -463,6 +474,170 @@ def dast_staging(run: "Run"):
         sh(["docker", "network", "rm", net], None, 60)
         for tag in images:
             sh(["docker", "rmi", tag], None, 120)
+
+
+# ------------------------------------------------------------------ NFR-1: no readable content at rest
+
+NFR1_TITLE = "NFR-1: known text in no store or log (staging)"
+_NFR1_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+_CHUNK = 4 * 1024 * 1024
+
+
+@dataclass
+class StagingSession:
+    """What the NFR-1 check needs from the running staging copy."""
+    net: str
+    base: str                       # scheme://app:port on the run's network
+    app: str                        # the app's container
+    services: dict[str, str]        # "postgres"/"redis" -> container
+    companions: dict[str, str] = field(default_factory=dict)   # alias -> container
+    ca: Path | None = None
+
+
+def nfr1_text() -> str:
+    """The run's known text: random for each run, ASCII letters, digits and hyphens only, so that no log
+    escaping or URL encoding changes it."""
+    return f"GMshield-NFR1-probe-{token_hex(16)}"
+
+
+def nfr1_needles(text: str) -> dict[str, list[bytes]]:
+    """The text as bytes in each encoding searched for: plain UTF-8; Base64 and Base64url at each of the
+    three alignments a value can start at inside a longer encoded stream (only the characters that the
+    text alone decides), Base64 also with "/" escaped as "\\/" (JSON); and hex in lower case (the way
+    pg_dump writes a bytea column) and upper case."""
+    raw = text.encode("utf-8")
+    b64: list[bytes] = []
+    for shift in range(3):
+        enc = base64.b64encode(b"\0" * shift + raw)
+        b64.append(enc[-(-8 * shift // 6):(8 * (shift + len(raw))) // 6])
+    return {"plain": [raw], "base64": b64 + [n.replace(b"/", b"\\/") for n in b64 if b"/" in n],
+            "base64url": [n.translate(bytes.maketrans(b"+/", b"-_")) for n in b64],
+            "hex": [raw.hex().encode(), raw.hex().upper().encode()]}
+
+
+def nfr1_search(path: Path, needles: dict[str, list[bytes]]) -> list[str]:
+    """The encodings of the text found in a file, read in chunks that overlap by the longest needle."""
+    longest = max(len(n) for ns in needles.values() for n in ns)
+    found: set[str] = set()
+    tail = b""
+    with open(path, "rb") as fh:
+        while chunk := fh.read(_CHUNK):
+            window = tail + chunk
+            for kind, ns in needles.items():
+                if kind not in found and any(n in window for n in ns):
+                    found.add(kind)
+            tail = window[-(longest - 1):] if longest > 1 else b""
+    return sorted(found)
+
+
+def _nfr1_http(run: "Run", sess: StagingSession, name: str, url: str, work: Path, log: Path,
+               body: Path | None = None) -> dict | None:
+    """One request from inside the run's network; the answer (a JSON object) or None."""
+    out = work / f"{name}.json"
+    args = ["curl", "-sS", "-f", "--max-time", "60", "-o", f"/work/{out.name}"]
+    mounts: list = [(work, "/work", "rw")]
+    if sess.ca is not None:
+        args += ["--cacert", "/certs/ca.crt"]
+        mounts.append((sess.ca, "/certs/ca.crt", "ro"))
+    if body is not None:
+        args += ["-X", "POST", "-H", "Content-Type: application/json", "--data-binary", f"@/work/{body.name}"]
+    rc = run.docker.run(name, run.s.images["zap"], [*args, url], log=log, timeout=120, network=sess.net,
+                        entrypoint="", mounts=mounts)
+    if rc != 0 or not out.is_file():
+        return None
+    try:
+        answer = json.loads(out.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
+def _nfr1_seed(run: "Run", sess: StagingSession, text: str, work: Path, log: Path) -> tuple[bool, bool, str]:
+    """(seeded, read back, why not) through the contract's two routes."""
+    c = run.contract
+    seed = work / "seed-request.json"
+    seed.write_text(json.dumps({"text": text}))
+    answer = _nfr1_http(run, sess, "nfr1-seed", sess.base + c.nfr1_seed_path, work, log, body=seed)
+    rid = answer.get("id") if answer else None
+    if not isinstance(rid, str) or not _NFR1_ID.fullmatch(rid):
+        return False, False, f"POST {c.nfr1_seed_path} did not answer 2xx with an id"
+    back = _nfr1_http(run, sess, "nfr1-readback", sess.base + c.nfr1_readback_path.replace(NFR1_ID, rid), work, log)
+    if not back or any(v != text for v in back.values()):
+        return True, False, f"GET {c.nfr1_readback_path} did not return the text"
+    return True, True, ""
+
+
+def _nfr1_copies(run: "Run", sess: StagingSession, stores: Path, log: Path) -> tuple[list[tuple[str, Path]], str | None]:
+    """Copies of every store and log of the session: (name, file), or the store that could not be copied."""
+    c = run.contract
+    out: list[tuple[str, Path]] = []
+    if "postgres" in sess.services:
+        f = stores / "postgres.sql"
+        if capture_to(["docker", "exec", sess.services["postgres"], "pg_dump", "-U", "gmshield", "-d", "gmshield",
+                       "--no-owner"], f, log, 600) != 0:
+            return out, "pg_dump of the database failed"
+        out.append(("database (pg_dump)", f))
+    if "redis" in sess.services:
+        f = stores / "redis.rdb"
+        cname = sess.services["redis"]
+        # In Redis's own tmpfs /data (not a world-writable /tmp), streamed out with cat:
+        # docker cp cannot read a tmpfs mount.
+        rdb = "/data/gmshield-nfr1.rdb"
+        if sh(["docker", "exec", cname, "redis-cli", "--rdb", rdb], log, 600) != 0 or \
+                capture_to(["docker", "exec", cname, "cat", rdb], f, log, 600) != 0 or not f.is_file():
+            return out, "the Redis RDB (redis-cli --rdb) could not be taken"
+        out.append(("Redis (RDB)", f))
+    for m in c.mounts:
+        f = stores / f"volume-{m.name}.tar"
+        if capture_to(["docker", "cp", f"{sess.app}:{m.target}", "-"], f, log, 1200) != 0:
+            return out, f"the volume '{m.name}' ({m.target}) could not be copied"
+        out.append((f"volume '{m.name}' ({m.target})", f))
+    logs = {"app log": sess.app, **{f"{svc} log": cn for svc, cn in sess.services.items()},
+            **{f"companion {alias} log": cn for alias, cn in sess.companions.items()}}
+    for name, cname in logs.items():
+        f = stores / f"{name.replace(' ', '-')}.log"
+        try:
+            container_logs(cname, f)
+        except Exception as e:
+            return out, f"the {name} could not be read: {type(e).__name__}"
+        out.append((name, f))
+    return out, None
+
+
+def nfr1_check(run: "Run", sess: StagingSession):
+    """NFR-1: store a random known text through the app, read it back, then search a copy of every store
+    (pg_dump, the RDB, each mounted volume) and every log of the session for it, plain and encoded."""
+    work = run.work / "nfr1"
+    stores = work / "stores"            # copies only: the seed request and answers stay out of the search
+    stores.mkdir(parents=True, exist_ok=True)
+    outdir = run.dir / "nfr1"
+    outdir.mkdir(parents=True, exist_ok=True)
+    log = outdir / "nfr1.log"
+    text = nfr1_text()
+    seeded, read_back, why = _nfr1_seed(run, sess, text, work, log)
+    copies, err = _nfr1_copies(run, sess, stores, log)
+    needles = nfr1_needles(text)
+    searched = []
+    for name, f in copies:
+        searched.append({"store": name, "bytes": f.stat().st_size, "found": nfr1_search(f, needles)})
+    found_in = [f"{x['store']} ({', '.join(x['found'])})" for x in searched if x["found"]]
+    m = {"seeded": seeded, "read_back": read_back, "seed_problem": why, "stores": searched, "found_in": found_in,
+         "encodings": sorted(needles)}
+    write_json(outdir / "nfr1.json", m)
+    files = ["nfr1/nfr1.json", "nfr1/nfr1.log"]
+    if err:
+        found = f"; already FOUND in {'; '.join(found_in)}" if found_in else ""
+        return "error", {**m, "error": f"{err}; NFR-1 cannot be shown{found}"}, files, \
+            f"{err}; NFR-1 cannot be shown{found}"
+    verdict = ("FOUND in " + "; ".join(found_in)) if found_in else f"not found in {len(searched)} store(s) and log(s)"
+    return "ok", m, files, f"{'seeded and read back' if read_back else why}; {verdict}"
+
+
+def nfr1_not_run(run: "Run"):
+    """Recorded when the staging session never reached the check."""
+    if not run.contract.nfr1:
+        return _skip("no [nfr1] table in .gmshield/pipeline.toml")
+    return _error("the staging session ended before the NFR-1 check could run (see the DAST stage)")
 
 
 # ------------------------------------------------------------------ integration tests

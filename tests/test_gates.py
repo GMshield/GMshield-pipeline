@@ -1,5 +1,4 @@
 """Unit tests for report parsing, quality gates and the repo contract. Run: python3 -m unittest -v"""
-import importlib.util
 import json
 import tempfile
 import threading
@@ -170,20 +169,6 @@ class WarningTest(unittest.TestCase):
         self.assertIn("## Warnings", text)
         self.assertIn(f"- **SAST (Semgrep):** {self.WARNING}", text)
 
-    def test_workstation_release_page_lists_warnings(self):
-        spec = importlib.util.spec_from_file_location("gmshield_results",
-                                                      RUNNER_DIR / "workstation" / "gmshield-results.py")
-        tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tool)
-        stage = {"key": "sast", "title": "SAST (Semgrep)", "status": "passed", "detail": "high 0", "threshold": "-",
-                 "files": [], "reasons": []}
-        run = {"repo": "GMshield-sample", "branch": "develop", "sha": "abcdef12" * 5, "run": "run-1",
-               "result": "passed", "started": "2026-11-10T12:00:00+00:00", "commit": {}, "stages": [stage]}
-        self.assertNotIn("## Warnings", tool.release_md(run))            # runs from before warnings existed
-        stage["warnings"] = [self.WARNING]
-        text = tool.release_md(run)
-        self.assertIn("1 warning, listed below.", text)
-        self.assertIn(f"- **SAST (Semgrep):** {self.WARNING}", text)
 
 
 class ContractTest(unittest.TestCase):

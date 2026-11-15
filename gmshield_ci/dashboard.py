@@ -33,7 +33,7 @@ STAGES = {
                 ("secrets", "Secr", "Gitleaks"), ("sca_iac:sca", "SCA", "Trivy deps"),
                 ("sca_iac:iac", "IaC", "Trivy IaC"), ("sast", "Semg", "Semgrep"),
                 ("sonar", "Sonr", "SonarQube"), ("image", "Img", "image"), ("integration_tests", "Intg", "integration tests"),
-                ("dast", "DAST", "ZAP active")],
+                ("dast", "DAST", "ZAP active"), ("nfr1", "NFR1", "known text at rest")],
     "main": [("resolve", "Res", "resolve"), ("promotion", "Prom", "passed develop"), ("image", "Img", "image"),
              ("publish", "Publ", "registry"), ("deploy", "Depl", "deploy"), ("dast_prod", "DAST", "ZAP passive"),
              ("release", "Rel", "release")],
@@ -355,7 +355,7 @@ def render(snap: Snapshot, cols: int, rows: int, now: datetime, color: bool = Fa
         top.append([(" Polling GitHub…", "yellow")])
     top.append([("─" * cols, "dim")])
 
-    footer = " Details and reports: gmshield-results on the workstation"
+    footer = " Details and reports: ~/gmshield-ci/artifacts/<repo>/<branch>/latest/"
     updated = f"refreshed {now.astimezone():%H:%M:%S} "
     bottom = [[(footer + " " * max(1, cols - len(footer) - len(updated)) + updated, "dim")]]
     body_h = rows - len(top) - len(bottom)
