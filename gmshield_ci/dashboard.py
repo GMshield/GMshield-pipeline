@@ -355,7 +355,7 @@ def render(snap: Snapshot, cols: int, rows: int, now: datetime, color: bool = Fa
         top.append([(" Polling GitHub…", "yellow")])
     top.append([("─" * cols, "dim")])
 
-    footer = " Details and reports: gmshield-results on the workstation"
+    footer = " Details and reports: ~/gmshield-ci/artifacts/<repo>/<branch>/latest/"
     updated = f"refreshed {now.astimezone():%H:%M:%S} "
     bottom = [[(footer + " " * max(1, cols - len(footer) - len(updated)) + updated, "dim")]]
     body_h = rows - len(top) - len(bottom)

@@ -54,7 +54,7 @@ never by loosening the gates.
 uses syntax newer than its parser (in Java 25: `import module` and statements before `super()`).
 Findings in that code may be missing, so the run reports a warning for each such file, with the lines
 when Semgrep gives them. A warning never changes the result: it appears in the SAST result,
-`summary.md`, `RELEASE.md`, the GitHub status and `gmshield-results` (column `Warn`).
+`summary.md`, the artifacts index, `RELEASE.md` and the GitHub status.
 
 ### SonarQube and the human decision
 
@@ -68,7 +68,7 @@ SonarQube, then re-run the branch. Coverage (>= 80%) is listed but disabled unti
 ssh -N -o ExitOnForwardFailure=no -L 9000:127.0.0.1:9000 roberto-server   # then http://localhost:9000
 # start it if the pipeline is not running it: cd ~/gmshield-ci/sonarqube && docker compose up -d
 # admin password: ~/gmshield-ci/sonarqube/credentials.env on roberto-server
-gmshield-results -b develop -r backend --rerun      # from the workstation, after the review
+ssh -o ClearAllForwardings=yes roberto-server 'cd ~/gmshield-ci/runner && python3 -m gmshield_ci run backend develop'   # after the review
 ```
 
 SonarQube (26.10 Community Build + PostgreSQL 17, [`sonarqube/compose.yaml`](sonarqube/compose.yaml))
@@ -156,24 +156,15 @@ JSON + SARIF, SonarQube JSON, Trivy JSON, CycloneDX SBOMs for source and image, 
 HTML/JSON/Markdown/XML, build and test logs). `artifacts/README.md` indexes all runs;
 `releases/<tag>/` records each production release.
 
-On the workstation, results are fetched by hand with
-[`workstation/gmshield-results.py`](workstation/gmshield-results.py) (installed as `gmshield-results`;
-nothing is scheduled). Each call fetches new runs (raw copies kept in `~/.cache/gmshield/artifacts`)
-and files every run as one release folder in `~/agentic-RPG/docs`, separated by branch:
-
-```
-ci-cd/develop/release-develop-<YYYYMMDDTHHMMSSZ>/   RELEASE.md, release.json, artifacts/
-ci-cd/main/release-main-<YYYYMMDDTHHMMSSZ>/         RELEASE.md, release.json, artifacts/
-```
+Results stay on roberto-server; nothing is copied to the workstation. Read them over SSH
+(`ssh -o ClearAllForwardings=yes roberto-server '<command>'`, from `~/gmshield-ci/artifacts`):
 
 | Command | Shows |
 |---|---|
-| `gmshield-results` | the latest result of every repo and branch |
-| `gmshield-results -b develop` | the most recent develop run of every repo, test by test |
-| `gmshield-results -b main -r backend` | the most recent main run of one repo |
-| `gmshield-results -b develop -t sonarqube` | one test (names: `--tests`), with threshold and report paths |
-| `gmshield-results --list` / `--release <folder>` | every release folder / one past run |
-| `gmshield-results -b develop -r backend --rerun` | re-runs it on the server first |
+| `cat README.md` | the latest result of every repo and branch, and the 40 most recent runs |
+| `cat GMshield-backend/develop/latest/summary.md` | the most recent run of one repo and branch, test by test |
+| `ls GMshield-backend/develop` | every run of one repo and branch (folder `<YYYYMMDD-HHMMSS>-<sha>`, UTC) |
+| `scp -r roberto-server:gmshield-ci/artifacts/GMshield-backend/develop/latest/dast .` | one report folder, when it is needed locally |
 
 `docs/CI-CD-RESULTS.md` in the workspace lists the command for every test on both branches.
 
@@ -185,7 +176,7 @@ full run (PASSED, FAILED or BLOCKED) with one column per pipeline stage (`ok`, `
 when the stage never ran), then what blocked it with the gate's reason, the run in progress with its
 last log line, and the branch's most recent runs; the `main` section also shows the newest release. It redraws every 5 seconds from
 `state/` and `artifacts/` only: it never takes the poll lock, calls GitHub or writes anything.
-Detailed reports still come through `gmshield-results`.
+Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 
 - Install once: `sudo bash deploy/install-dashboard.sh` (service `gmshield-dashboard`; the login
   prompt moves to tty2, Ctrl+Alt+F2). Times are shown in `America/Sao_Paulo`; set `DASH_TZ` to change.
