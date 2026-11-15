@@ -580,9 +580,11 @@ def _nfr1_copies(run: "Run", sess: StagingSession, stores: Path, log: Path) -> t
     if "redis" in sess.services:
         f = stores / "redis.rdb"
         cname = sess.services["redis"]
-        # /tmp, not the tmpfs /data: docker cp cannot read a tmpfs mount.
-        if sh(["docker", "exec", cname, "redis-cli", "--rdb", "/tmp/gmshield-nfr1.rdb"], log, 600) != 0 or \
-                sh(["docker", "cp", f"{cname}:/tmp/gmshield-nfr1.rdb", str(f)], log, 600) != 0 or not f.is_file():
+        # In Redis's own tmpfs /data (not a world-writable /tmp), streamed out with cat:
+        # docker cp cannot read a tmpfs mount.
+        rdb = "/data/gmshield-nfr1.rdb"
+        if sh(["docker", "exec", cname, "redis-cli", "--rdb", rdb], log, 600) != 0 or \
+                capture_to(["docker", "exec", cname, "cat", rdb], f, log, 600) != 0 or not f.is_file():
             return out, "the Redis RDB (redis-cli --rdb) could not be taken"
         out.append(("Redis (RDB)", f))
     for m in c.mounts:
