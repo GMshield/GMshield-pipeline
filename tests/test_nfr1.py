@@ -17,7 +17,7 @@ from gmshield_ci.config import RUNNER_DIR, ContractError
 from tests.test_contract import RUN_ID, SHA, FakeDocker, contract_from, settings
 
 GATES = tomllib.loads((RUNNER_DIR / "gates.toml").read_text())
-TEXT = "GMshield NFR-1 probe 0123456789abcdef0123456789abcdef"
+TEXT = "GMshield-NFR1-probe-0123456789abcdef0123456789abcdef"
 PROBE_ID = "0195a3c0-1111-7000-8000-000000000001"
 NFR1 = ('[nfr1]\nseed_path = "/internal/v1/test-mode/nfr1-probe"\n'
         'readback_path = "/internal/v1/test-mode/nfr1-probe/{id}"\n')
@@ -57,10 +57,29 @@ class ContractTest(unittest.TestCase):
 
 
 class NeedleTest(unittest.TestCase):
-    def test_text_is_random_for_each_run_and_plain_ascii(self):
+    def test_text_is_random_for_each_run_and_survives_url_encoding(self):
+        from urllib.parse import quote, quote_plus
         a, b = stages.nfr1_text(), stages.nfr1_text()
         self.assertNotEqual(a, b)
-        self.assertTrue(a.isascii() and a.isprintable())
+        self.assertRegex(a, r"^[A-Za-z0-9-]+$")
+        self.assertEqual((quote(a), quote_plus(a)), (a, a))
+
+    def test_json_escaped_base64_and_uppercase_hex_are_found(self):
+        # The run's own text (letters, digits, hyphens) never encodes to "/" or "+"; a text with "?" does,
+        # so the escaped needles are exercised on one.
+        odd = "probe???text???end"
+        needles = stages.nfr1_needles(odd)
+        self.assertTrue(any(b"\\/" in n for n in needles["base64"]))
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "store"
+            for prefix in (b"", b"x", b"xy"):
+                enc = base64.b64encode(prefix + odd.encode())
+                self.assertIn(b"/", enc)
+                with self.subTest(prefix=prefix):
+                    f.write_bytes(b'{"v":"' + enc.replace(b"/", b"\\/") + b'"}')
+                    self.assertIn("base64", stages.nfr1_search(f, needles))
+            f.write_bytes(b"0x" + TEXT.encode().hex().upper().encode())
+            self.assertEqual(stages.nfr1_search(f, stages.nfr1_needles(TEXT)), ["hex"])
 
     def test_base64_is_found_at_every_alignment_inside_a_longer_value(self):
         needles = stages.nfr1_needles(TEXT)
@@ -259,6 +278,15 @@ class StagingCheckTest(unittest.TestCase):
                 rec = self.nfr1(self.run_for())
                 self.assertEqual((rec.outcome, rec.status), ("error", "failed"))
                 self.assertIn(words, rec.reasons[0])
+
+    def test_a_failed_copy_still_names_where_the_text_was_already_found(self):
+        self.content["pg"] = ("INSERT '" + TEXT + "'").encode()
+        self.rc["volume"] = 1
+        rec = self.nfr1(self.run_for())
+        self.assertEqual((rec.outcome, rec.status), ("error", "failed"))
+        self.assertIn("already FOUND in database (pg_dump) (plain)", rec.reasons[0])
+        self.assertIn("already FOUND in database (pg_dump)", rec.detail)
+        self.assertEqual(rec.metrics["found_in"], ["database (pg_dump) (plain)"])
 
     def test_without_the_table_the_session_runs_no_check(self):
         run = self.run_for(BACKEND.split("[nfr1]")[0])

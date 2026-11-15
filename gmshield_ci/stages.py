@@ -495,21 +495,24 @@ class StagingSession:
 
 
 def nfr1_text() -> str:
-    """The run's known text: random for each run, plain ASCII so that no log escaping can hide it."""
-    return f"GMshield NFR-1 probe {token_hex(16)}"
+    """The run's known text: random for each run, ASCII letters, digits and hyphens only, so that no log
+    escaping or URL encoding changes it."""
+    return f"GMshield-NFR1-probe-{token_hex(16)}"
 
 
 def nfr1_needles(text: str) -> dict[str, list[bytes]]:
     """The text as bytes in each encoding searched for: plain UTF-8; Base64 and Base64url at each of the
     three alignments a value can start at inside a longer encoded stream (only the characters that the
-    text alone decides); and lowercase hex, the way pg_dump writes a bytea column."""
+    text alone decides), Base64 also with "/" escaped as "\\/" (JSON); and hex in lower case (the way
+    pg_dump writes a bytea column) and upper case."""
     raw = text.encode("utf-8")
     b64: list[bytes] = []
     for shift in range(3):
         enc = base64.b64encode(b"\0" * shift + raw)
         b64.append(enc[-(-8 * shift // 6):(8 * (shift + len(raw))) // 6])
-    return {"plain": [raw], "base64": b64, "base64url": [n.translate(bytes.maketrans(b"+/", b"-_")) for n in b64],
-            "hex": [raw.hex().encode()]}
+    return {"plain": [raw], "base64": b64 + [n.replace(b"/", b"\\/") for n in b64 if b"/" in n],
+            "base64url": [n.translate(bytes.maketrans(b"+/", b"-_")) for n in b64],
+            "hex": [raw.hex().encode(), raw.hex().upper().encode()]}
 
 
 def nfr1_search(path: Path, needles: dict[str, list[bytes]]) -> list[str]:
@@ -621,7 +624,9 @@ def nfr1_check(run: "Run", sess: StagingSession):
     write_json(outdir / "nfr1.json", m)
     files = ["nfr1/nfr1.json", "nfr1/nfr1.log"]
     if err:
-        return _error(f"{err}; NFR-1 cannot be shown", files)
+        found = f"; already FOUND in {'; '.join(found_in)}" if found_in else ""
+        return "error", {**m, "error": f"{err}; NFR-1 cannot be shown{found}"}, files, \
+            f"{err}; NFR-1 cannot be shown{found}"
     verdict = ("FOUND in " + "; ".join(found_in)) if found_in else f"not found in {len(searched)} store(s) and log(s)"
     return "ok", m, files, f"{'seeded and read back' if read_back else why}; {verdict}"
 
