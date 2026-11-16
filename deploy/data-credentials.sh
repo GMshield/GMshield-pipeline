@@ -7,7 +7,9 @@
 #                                      socket only), REDIS_PROBE_PASSWORD (health check, PING only),
 #                                      QDRANT_API_KEY (Qdrant's one key)
 #   ~/gmshield-ci/secrets/backend.env  Postgres role gmshield_backend (TLS, verify-full), Redis account backend,
-#                                      and the vault's master and index keys (Story 1.7, AD-19)
+#                                      the vault's master and index keys (Story 1.7, AD-19), and empty
+#                                      placeholders for the Google OAuth client id and secret (Story 1.9),
+#                                      which Dalton enters by hand and this script never overwrites
 #   ~/gmshield-ci/secrets/worker.env   Redis account worker and the Qdrant key (used from Story 1.12 / Epic 2)
 #   ~/gmshield-ci/secrets/frontend.env the backend's address on gmshield-app
 #   ~/stack/redis-users.acl            Redis accounts with SHA-256 hashes of the passwords above
@@ -55,6 +57,11 @@ setting() {  # setting <file> <key> <value>: a plain setting, once
   elif [ "$cur" = "$3" ]; then echo "    $2: already done"
   else echo "    $2: kept (differs from the default $3)"; fi
 }
+placeholder() {  # placeholder <file> <key>: a secret entered by hand; an empty KEY= once, a value never touched
+  if has "$1" "$2"; then echo "    $2: already done (entered by hand)"
+  elif [ -f "$1" ] && grep -q "^$2=" "$1"; then echo "    $2: still empty; enter it by hand (the backend refuses to start without it)"
+  else put "$1" "$2" ""; echo "    $2: placeholder added; enter it by hand (the backend refuses to start without it)"; fi
+}
 copied() {   # copied <from file> <from key> <to file> <to key>: the same secret in two places
   local src dst; src=$(value "$1" "$2"); dst=$(value "$3" "$4")
   [ -n "$src" ] || die "$2 is missing in $1"
@@ -80,6 +87,10 @@ setting "$B" GMSHIELD_REDIS_USERNAME backend
 secret "$B" GMSHIELD_REDIS_PASSWORD
 key_b64 "$B" GMSHIELD_VAULT_MASTER_KEY
 key_b64 "$B" GMSHIELD_VAULT_INDEX_KEY
+# Story 1.9: the Google OAuth client (redirect URI <GMSHIELD_PUBLIC_URL>/auth/google/callback, the public URL
+# being set in the backend's .gmshield/pipeline.toml). Created by Dalton in the Google Cloud console.
+placeholder "$B" GMSHIELD_GOOGLE_CLIENT_ID
+placeholder "$B" GMSHIELD_GOOGLE_CLIENT_SECRET
 
 W=$SECRETS/worker.env
 echo "==> 3/5 The worker ($W)"
