@@ -7,11 +7,13 @@
 #                                      socket only), REDIS_PROBE_PASSWORD (health check, PING only),
 #                                      QDRANT_API_KEY (Qdrant's one key)
 #   ~/gmshield-ci/secrets/backend.env  Postgres role gmshield_backend (TLS, verify-full), Redis account backend,
-#                                      the vault's master and index keys (Story 1.7, AD-19), and empty
-#                                      placeholders for the Google OAuth client id and secret (Story 1.9),
-#                                      which Dalton enters by hand and this script never overwrites
+#                                      the vault's master and index keys (Story 1.7, AD-19), the frontend's
+#                                      service credential (Story 1.10), and empty placeholders for the Google
+#                                      OAuth client id and secret (Story 1.9), which Dalton enters by hand and
+#                                      this script never overwrites
 #   ~/gmshield-ci/secrets/worker.env   Redis account worker and the Qdrant key (used from Story 1.12 / Epic 2)
-#   ~/gmshield-ci/secrets/frontend.env the backend's address on gmshield-app
+#   ~/gmshield-ci/secrets/frontend.env the backend's address on gmshield-app, and the same service credential
+#                                      as backend.env (Story 1.10: Authorization: Bearer on every /api/v1 call)
 #   ~/stack/redis-users.acl            Redis accounts with SHA-256 hashes of the passwords above
 # Every secret is 32 random bytes (64 hex characters; the two vault keys in Base64, as the backend reads
 # them), written once with mode 600, never printed. A value already present is kept, even if it differs
@@ -91,6 +93,9 @@ key_b64 "$B" GMSHIELD_VAULT_INDEX_KEY
 # being set in the backend's .gmshield/pipeline.toml). Created by Dalton in the Google Cloud console.
 placeholder "$B" GMSHIELD_GOOGLE_CLIENT_ID
 placeholder "$B" GMSHIELD_GOOGLE_CLIENT_SECRET
+# Story 1.10: the frontend's service credential. The backend refuses every /api/v1 call without it; the same
+# value goes into frontend.env below (copied dies when the two differ).
+secret "$B" GMSHIELD_FRONTEND_CREDENTIAL
 
 W=$SECRETS/worker.env
 echo "==> 3/5 The worker ($W)"
@@ -106,6 +111,7 @@ has "$W" GMSHIELD_ANTHROPIC_API_KEY || echo "    note: GMSHIELD_ANTHROPIC_API_KE
 F=$SECRETS/frontend.env
 echo "==> 4/5 The frontend ($F)"
 setting "$F" GMSHIELD_BACKEND_URL "$BACKEND_URL"
+copied "$B" GMSHIELD_FRONTEND_CREDENTIAL "$F" GMSHIELD_FRONTEND_CREDENTIAL
 
 echo "==> 5/5 The Redis accounts ($ACL)"
 keys=""; for s in "${STREAMS[@]}"; do keys="$keys ~$s"; done

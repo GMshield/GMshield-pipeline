@@ -258,12 +258,16 @@ def _zap(run: "Run", network: str, base: str, outdir: Path, active: bool):
     zopts = "-silent"
     if active:
         zopts += f" -config scanner.maxScanDurationInMins={lim.get('zap_active_minutes', 10)} -config scanner.threadPerHost=2"
+    # [dast].auth_header: ZAP adds it to every request; the value reaches the container through the
+    # docker CLI's environment, never a command line, a log or the summary.
+    auth = {"env": {"ZAP_AUTH_HEADER": c.dast_auth_name},
+            "secret_env": {"ZAP_AUTH_HEADER_VALUE": c.dast_auth_value}} if c.dast_auth_name else {}
     rc = run.docker.run("zap", run.s.images["zap"],
                         [script, *extra, "-I", "-T", "10", "-J", "zap.json", "-r", "zap.html", "-w", "zap.md",
                          "-x", "zap.xml", "-z", zopts],
                         log=outdir / "zap.log",
                         timeout=run.s.limit("zap_active" if active else "zap_passive", 1800),
-                        mounts=[(outdir, "/zap/wrk", "rw")], network=network, user=None)
+                        mounts=[(outdir, "/zap/wrk", "rw")], network=network, user=None, **auth)
     rel = outdir.name
     files = [f"{rel}/{f}" for f in ("zap.html", "zap.json", "zap.md", "zap.xml", "zap.log") if (outdir / f).exists()]
     if rc in (3, 124) or not (outdir / "zap.json").exists():

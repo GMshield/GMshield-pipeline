@@ -120,6 +120,8 @@ these options existed. The template documents each option and its default; in sh
 | | `read_only`, `user`, `cap_drop`, `tmpfs` | Hardening, in production and staging alike; any of the first three adds `--security-opt no-new-privileges` |
 | | `mounts` | `{ name, target, read_only }`: the source is a name, never a host path. Production: the Docker named volume `gmshield-<service>-<name>`; staging: a throwaway volume of the run (`gmshield-ci-<run>-<service>-<name>`, carrying the run's label, removed afterwards and by crash cleanup). Docker fills a new volume from the image's folder at `target`, owner included, so the image should create that folder owned by its user. Two mounts, tmpfs entries or the certificates may not share a target, and no target may be `/`. |
 | | `certs` | Production: the service's own folder `~/gmshield-ci/certs/<service>/` (`tls.crt`, `tls.key`, `ca.crt`; never another service's key or the CA key) read-only at `/run/gmshield/certs`; a missing folder (or, with `"https"`, a missing `ca.crt` in it) fails the deploy before production is touched. Staging: a throwaway CA and leaf (`ca.crt`, `tls.crt`, `tls.key`, for `app` and `<service>`) made with `openssl` for that run; the private authority never enters `ci.slice`. |
+| `[dast]` | `path`, `openapi` | Where ZAP starts crawling; or, with `openapi` (e.g. `/v3/api-docs`), an API scan of that description on develop. |
+| | `auth_header` | One header line `"Name: value"` (an HTTP token as the name, printable ASCII as the value, no line break) that ZAP adds to every scan request, passed to the ZAP container as `ZAP_AUTH_HEADER=<name>` and `ZAP_AUTH_HEADER_VALUE=<value>`. The value goes through the docker CLI's environment and is never printed (not in errors, command lines or the stage summary). Only a public test-mode value belongs here, e.g. the backend's test-mode frontend credential, so that the API scan reaches the controllers instead of meeting 401s. `""` or absent: no header. |
 | `[staging]` | `env` | Added over `[deploy].env` in staging only |
 | | `services` | `postgres` and/or `redis`, started on the run's internal network under those names and ready (`pg_isready`, `redis-cli ping`) before the app starts |
 | | `companions` | `[[staging.companions]] target, alias`: that Dockerfile stage (it must exist) is built and run beside the app as a stand-in, with `GMSHIELD_MODE=test` but without the contract's limits and hardening |
@@ -299,7 +301,10 @@ in `~/gmshield-ci/secrets/<service>.env` (the backend's include `GMSHIELD_VAULT_
 `GMSHIELD_VAULT_INDEX_KEY`, Base64, Story 1.7: an existing vault key is never replaced, since data
 encrypted under it would be lost; no off-server copy exists until Epic 10; Story 1.9 adds empty
 placeholders `GMSHIELD_GOOGLE_CLIENT_ID=` and `GMSHIELD_GOOGLE_CLIENT_SECRET=`, which Dalton fills by
-hand and the script never overwrites), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+hand and the script never overwrites; Story 1.10 adds `GMSHIELD_FRONTEND_CREDENTIAL`, one random secret
+written to both `backend.env` and `frontend.env`: the frontend sends it as `Authorization: Bearer` on
+every `/api/v1` call and the backend refuses any call without it; the script stops when the two files
+hold different values), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
 hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
 the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
 rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING
@@ -322,7 +327,8 @@ and restarts Ollama. An SSH tunnel to Ollama must now target `172.30.5.1:11434`.
 First deploy, in order (on roberto-server, as roberto, unless it says otherwise):
 
 1. `bash deploy/certs.sh issue`
-2. `bash deploy/data-credentials.sh`
+2. `bash deploy/data-credentials.sh` (rerun it after pulling a version that adds a secret, such as
+   Story 1.10's `GMSHIELD_FRONTEND_CREDENTIAL`, before deploying the backend that needs it)
 3. Add `GMSHIELD_ANTHROPIC_API_KEY=<key>` by hand to `~/gmshield-ci/secrets/worker.env` (mode 600 stays);
    the worker refuses to start without it. Fill `GMSHIELD_GOOGLE_CLIENT_ID` and
    `GMSHIELD_GOOGLE_CLIENT_SECRET` by hand in `~/gmshield-ci/secrets/backend.env`, from a Google OAuth

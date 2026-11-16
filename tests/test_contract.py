@@ -432,6 +432,77 @@ class ForbiddenTest(unittest.TestCase):
         self.assertEqual(run.contract.service, "")          # nothing else learns from a refused contract
 
 
+# ------------------------------------------------------------------ [dast].auth_header (Story 1.10)
+
+class DastAuthHeaderTest(unittest.TestCase):
+    VALUE = "Bearer gmshield-test-mode-frontend-credential-not-a-secret"
+
+    def dast(self, line):
+        return contract_from(f'[service]\nname="api"\nport=8080\n[dast]\nopenapi = "/v3/api-docs/public"\n{line}\n')
+
+    def test_absent_or_empty_is_no_header(self):
+        for line in ("", 'auth_header = ""'):
+            c = self.dast(line)
+            self.assertEqual((c.dast_auth_name, c.dast_auth_value), ("", ""))
+
+    def test_one_header_line_is_split_into_name_and_value(self):
+        c = self.dast(f'auth_header = "Authorization: {self.VALUE}"')
+        self.assertEqual((c.dast_auth_name, c.dast_auth_value), ("Authorization", self.VALUE))
+        c = self.dast('auth_header = "X-Api-Key:abc"')
+        self.assertEqual((c.dast_auth_name, c.dast_auth_value), ("X-Api-Key", "abc"))
+
+    def test_refuses_anything_but_one_header_line_without_printing_it(self):
+        for bad in ('"Authorization"', '"Authorization: "', '": value"', '"Bad Name: x"',
+                    '"Authorization: Bearer secret-value\\nX-Other: 1"', '"Authorization: Bearer secret-value\\r"',
+                    '"Authorization: Bearer secret-value\\u0000"', '"Authorization: Bearer s\\u00e9cret-value"', "42",
+                    '["Authorization: x"]'):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ContractError, r"\[dast\].auth_header") as refused:
+                    self.dast(f"auth_header = {bad}")
+                self.assertNotIn("secret-value", str(refused.exception))
+
+    def zap_run(self, contract, tmp):
+        report = (FIX / "reports" / "zap.json").read_bytes()
+
+        class ZapDocker(FakeDocker):
+            def run(self, name, image, args, **kw):
+                (kw["mounts"][0][0] / "zap.json").write_bytes(report)
+                return super().run(name, image, args, **kw)
+
+        run = types.SimpleNamespace(s=settings(tmp), contract=contract, docker=ZapDocker(), src=tmp / "src")
+        outcome, metrics, files, summary = stages._zap(run, "net", "http://app:8080", tmp / "dast", True)
+        self.assertEqual(outcome, "ok")
+        [(name, _, args, kw)] = run.docker.calls
+        return args, kw, summary
+
+    def test_zap_carries_the_header_on_every_request_and_never_prints_the_value(self):
+        with tempfile.TemporaryDirectory() as d:
+            args, kw, summary = self.zap_run(self.dast(f'auth_header = "Authorization: {self.VALUE}"'), Path(d))
+        self.assertEqual(kw["env"], {"ZAP_AUTH_HEADER": "Authorization"})
+        self.assertEqual(kw["secret_env"], {"ZAP_AUTH_HEADER_VALUE": self.VALUE})
+        self.assertNotIn(self.VALUE, " ".join(args))
+        self.assertNotIn(self.VALUE, summary)
+
+    def test_zap_without_the_key_passes_no_header(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, kw, _ = self.zap_run(self.dast(""), Path(d))
+        self.assertNotIn("env", kw)
+        self.assertNotIn("secret_env", kw)
+
+    def test_the_value_reaches_docker_through_its_environment_not_its_command_line(self):
+        seen = []
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(dockerops, "sh", lambda cmd, log, timeout, env=None: seen.append((cmd, env)) or 0):
+            dockerops.Docker("ci.slice", RUN_ID, "inst").run(
+                "zap", "zap@sha256:1", ["zap-api-scan.py"], log=Path(d) / "zap.log", timeout=60,
+                env={"ZAP_AUTH_HEADER": "Authorization"}, secret_env={"ZAP_AUTH_HEADER_VALUE": self.VALUE})
+        [(cmd, env)] = seen
+        self.assertIn("ZAP_AUTH_HEADER=Authorization", cmd)
+        self.assertIn("ZAP_AUTH_HEADER_VALUE", cmd)
+        self.assertNotIn(self.VALUE, " ".join(cmd))
+        self.assertEqual(env, {"ZAP_AUTH_HEADER_VALUE": self.VALUE})
+
+
 # ------------------------------------------------------------------ runtime behaviour, Docker recorded
 
 class FakeDocker(dockerops.Docker):
