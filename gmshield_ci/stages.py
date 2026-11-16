@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -552,19 +553,43 @@ def _nfr1_http(run: "Run", sess: StagingSession, name: str, url: str, work: Path
     return answer if isinstance(answer, dict) else None
 
 
-def _nfr1_seed(run: "Run", sess: StagingSession, text: str, work: Path, log: Path) -> tuple[bool, bool, str]:
-    """(seeded, read back, why not) through the contract's two routes."""
+def _nfr1_seed(run: "Run", sess: StagingSession, text: str, work: Path,
+               log: Path) -> tuple[bool, bool, str, str | None]:
+    """(seeded, read back, why not, the seeded id) through the contract's two routes."""
     c = run.contract
     seed = work / "seed-request.json"
     seed.write_text(json.dumps({"text": text}))
     answer = _nfr1_http(run, sess, "nfr1-seed", sess.base + c.nfr1_seed_path, work, log, body=seed)
     rid = answer.get("id") if answer else None
     if not isinstance(rid, str) or not _NFR1_ID.fullmatch(rid):
-        return False, False, f"POST {c.nfr1_seed_path} did not answer 2xx with an id"
+        return False, False, f"POST {c.nfr1_seed_path} did not answer 2xx with an id", None
     back = _nfr1_http(run, sess, "nfr1-readback", sess.base + c.nfr1_readback_path.replace(NFR1_ID, rid), work, log)
     if not back or any(v != text for v in back.values()):
-        return True, False, f"GET {c.nfr1_readback_path} did not return the text"
-    return True, True, ""
+        return True, False, f"GET {c.nfr1_readback_path} did not return the text", rid
+    return True, True, "", rid
+
+
+def _nfr1_holds_a_file(tar_path: Path) -> bool:
+    """Whether a `docker cp ... -` copy holds at least one regular file (not only folders)."""
+    try:
+        with tarfile.open(tar_path) as tar:
+            return any(member.isfile() for member in tar)
+    except (tarfile.TarError, OSError):
+        return False
+
+
+def _nfr1_missing_evidence(copies: list[tuple[str, Path]], rid: str | None) -> list[str]:
+    """The stores that show no trace of the seeded data, so that "not found" there would prove nothing:
+    the database dump must name the seeded id, and each volume copy must hold a file."""
+    if rid is None:
+        return []          # not seeded: the gate already fails on that
+    missing = []
+    for name, f in copies:
+        if name.startswith("database") and not nfr1_search(f, {"id": [rid.encode()]}):
+            missing.append(f"{name}: the seeded id {rid} is not in it")
+        elif name.startswith("volume") and not _nfr1_holds_a_file(f):
+            missing.append(f"{name}: it holds no file")
+    return missing
 
 
 def _nfr1_copies(run: "Run", sess: StagingSession, stores: Path, log: Path) -> tuple[list[tuple[str, Path]], str | None]:
@@ -614,7 +639,7 @@ def nfr1_check(run: "Run", sess: StagingSession):
     outdir.mkdir(parents=True, exist_ok=True)
     log = outdir / "nfr1.log"
     text = nfr1_text()
-    seeded, read_back, why = _nfr1_seed(run, sess, text, work, log)
+    seeded, read_back, why, rid = _nfr1_seed(run, sess, text, work, log)
     copies, err = _nfr1_copies(run, sess, stores, log)
     needles = nfr1_needles(text)
     searched = []
@@ -622,7 +647,7 @@ def nfr1_check(run: "Run", sess: StagingSession):
         searched.append({"store": name, "bytes": f.stat().st_size, "found": nfr1_search(f, needles)})
     found_in = [f"{x['store']} ({', '.join(x['found'])})" for x in searched if x["found"]]
     m = {"seeded": seeded, "read_back": read_back, "seed_problem": why, "stores": searched, "found_in": found_in,
-         "encodings": sorted(needles)}
+         "missing_evidence": _nfr1_missing_evidence(copies, rid), "encodings": sorted(needles)}
     write_json(outdir / "nfr1.json", m)
     files = ["nfr1/nfr1.json", "nfr1/nfr1.log"]
     if err:
