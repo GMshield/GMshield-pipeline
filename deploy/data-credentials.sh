@@ -8,10 +8,12 @@
 #                                      QDRANT_API_KEY (Qdrant's one key)
 #   ~/gmshield-ci/secrets/backend.env  Postgres role gmshield_backend (TLS, verify-full), Redis account backend,
 #                                      the vault's master and index keys (Story 1.7, AD-19), the frontend's
-#                                      service credential (Story 1.10), and empty placeholders for the Google
-#                                      OAuth client id and secret (Story 1.9), which Dalton enters by hand and
-#                                      this script never overwrites
-#   ~/gmshield-ci/secrets/worker.env   Redis account worker and the Qdrant key (used from Story 1.12 / Epic 2)
+#                                      service credential (Story 1.10), the worker's credential (Story 1.12),
+#                                      and empty placeholders for the Google OAuth client id and secret
+#                                      (Story 1.9), which Dalton enters by hand and this script never overwrites
+#   ~/gmshield-ci/secrets/worker.env   Redis account worker, the Qdrant key (Epic 2) and the same worker
+#                                      credential as backend.env (Story 1.12: Authorization: Bearer on every
+#                                      /internal/v1 call)
 #   ~/gmshield-ci/secrets/frontend.env the backend's address on gmshield-app, and the same service credential
 #                                      as backend.env (Story 1.10: Authorization: Bearer on every /api/v1 call)
 #   ~/stack/redis-users.acl            Redis accounts with SHA-256 hashes of the passwords above
@@ -96,6 +98,9 @@ placeholder "$B" GMSHIELD_GOOGLE_CLIENT_SECRET
 # Story 1.10: the frontend's service credential. The backend refuses every /api/v1 call without it; the same
 # value goes into frontend.env below (copied dies when the two differ).
 secret "$B" GMSHIELD_FRONTEND_CREDENTIAL
+# Story 1.12: the worker's credential. The backend refuses every /internal/v1 call without it; the same value
+# goes into worker.env below (copied dies when the two differ).
+secret "$B" GMSHIELD_WORKER_CREDENTIAL
 
 W=$SECRETS/worker.env
 echo "==> 3/5 The worker ($W)"
@@ -106,6 +111,7 @@ setting "$W" GMSHIELD_REDIS_USERNAME worker
 secret "$W" GMSHIELD_REDIS_PASSWORD
 setting "$W" GMSHIELD_QDRANT_URL https://qdrant:6333
 copied "$STACK_ENV" QDRANT_API_KEY "$W" GMSHIELD_QDRANT_API_KEY
+copied "$B" GMSHIELD_WORKER_CREDENTIAL "$W" GMSHIELD_WORKER_CREDENTIAL
 has "$W" GMSHIELD_ANTHROPIC_API_KEY || echo "    note: GMSHIELD_ANTHROPIC_API_KEY is not set; the worker refuses to start without it (add it by hand)"
 
 F=$SECRETS/frontend.env
