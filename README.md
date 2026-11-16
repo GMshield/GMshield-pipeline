@@ -297,7 +297,9 @@ host port.
 mode 600, never printed; a rerun says `already done`): the stack's own in `~/stack/.env`, the clients'
 in `~/gmshield-ci/secrets/<service>.env` (the backend's include `GMSHIELD_VAULT_MASTER_KEY` and
 `GMSHIELD_VAULT_INDEX_KEY`, Base64, Story 1.7: an existing vault key is never replaced, since data
-encrypted under it would be lost; no off-server copy exists until Epic 10), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+encrypted under it would be lost; no off-server copy exists until Epic 10; Story 1.9 adds empty
+placeholders `GMSHIELD_GOOGLE_CLIENT_ID=` and `GMSHIELD_GOOGLE_CLIENT_SECRET=`, which Dalton fills by
+hand and the script never overwrites), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
 hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
 the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
 rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING
@@ -322,7 +324,11 @@ First deploy, in order (on roberto-server, as roberto, unless it says otherwise)
 1. `bash deploy/certs.sh issue`
 2. `bash deploy/data-credentials.sh`
 3. Add `GMSHIELD_ANTHROPIC_API_KEY=<key>` by hand to `~/gmshield-ci/secrets/worker.env` (mode 600 stays);
-   the worker refuses to start without it.
+   the worker refuses to start without it. Fill `GMSHIELD_GOOGLE_CLIENT_ID` and
+   `GMSHIELD_GOOGLE_CLIENT_SECRET` by hand in `~/gmshield-ci/secrets/backend.env`, from a Google OAuth
+   client whose redirect URI is the backend contract's `GMSHIELD_PUBLIC_URL` followed by
+   `/auth/google/callback` (`http://localhost:3000/auth/google/callback`, through the SSH tunnel to the
+   frontend); the backend refuses to start without them.
 4. `bash deploy/stack.sh up` (also after `certs.sh issue --renew` or a new account list: it recreates
    each service whose certificates, accounts or start script changed since the last successful `up`)
 5. `sudo bash deploy/secure-ollama.sh apply`
