@@ -25,6 +25,10 @@ test_target = "test"        # Dockerfile stage that runs the unit tests
 [dast]
 path = "/"                  # where ZAP starts crawling (same characters as health_path)
 openapi = ""                # e.g. "/v3/api-docs": ZAP API scan instead of crawling (develop)
+auth_header = ""            # e.g. "Authorization: Bearer <test-mode value>": one header line that ZAP adds
+                            # to every scan request (ZAP_AUTH_HEADER/ZAP_AUTH_HEADER_VALUE); "" = none.
+                            # An HTTP token as the name, printable ASCII as the value, no line break; the
+                            # value is never printed. Put only a public test-mode value here, never a secret.
 
 [deploy]
 host_port = 0               # publish on 127.0.0.1:<host_port> in production (0-65535); 0 = not published.

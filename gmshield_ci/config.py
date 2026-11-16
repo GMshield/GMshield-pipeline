@@ -103,6 +103,8 @@ _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # backtick may appear, so the quoting cannot be broken (`;`, `&` and `?` are harmless inside it).
 _URL_PATH = re.compile(r"/[A-Za-z0-9._~%:@+,;=/-]*(\?[A-Za-z0-9._~%:@+,;=/&?-]*)?")
 _CPUS = re.compile(r"[0-9]+(\.[0-9]+)?")
+# One header line: an HTTP token as the name, then printable ASCII (no CR, LF or other control character).
+_AUTH_HEADER = re.compile(r"([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*([\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?)")
 _ALIAS = re.compile(r"[a-z0-9][a-z0-9-]*")
 _PATH = re.compile(r"/[A-Za-z0-9_./-]*")                   # absolute container paths, no ':' or ','
 _TMPFS = re.compile(r"/[A-Za-z0-9_./-]*(:[A-Za-z0-9_=,.-]+)?")
@@ -139,6 +141,8 @@ class Contract:
     test_target: str = "test"     # Dockerfile stage that runs unit tests
     dast_path: str = "/"
     openapi: str = ""             # e.g. /v3/api-docs -> ZAP API scan on develop
+    dast_auth_name: str = ""      # [dast].auth_header "Name: value": every ZAP request carries it
+    dast_auth_value: str = ""     # never printed (ContractError, summary and command lines alike)
     host_port: int = 0            # 127.0.0.1:<host_port> in production; 0 = not published
     env: dict = field(default_factory=dict)
     self_update: bool = False     # GMshield-pipeline only: deploying = updating the runner itself
@@ -251,6 +255,18 @@ def _url_path(t: dict, sect: str, key: str) -> str:
     return v
 
 
+def _auth_header(t: dict) -> tuple[str, str]:
+    """[dast].auth_header: ("", "") when absent; the value never appears in an error."""
+    v = t.get("auth_header", "")
+    if v == "":
+        return "", ""
+    m = _AUTH_HEADER.fullmatch(v) if isinstance(v, str) else None
+    if not m:
+        raise ContractError("[dast].auth_header: one header line \"Name: value\" (an HTTP token as the name, "
+                            "printable ASCII as the value, no line break)")
+    return m.group(1), m.group(2)
+
+
 def _target(v: str) -> str:
     """A container path as Docker sees it: repeated slashes and '.' segments do not count."""
     return posixpath.normpath(re.sub(r"/+", "/", v))
@@ -310,6 +326,7 @@ def _parse(c: Contract, data: dict) -> None:
     c.test_target = str(build.get("test_target", "test"))
     c.dast_path = _url_path(dast, "dast", "path")
     c.openapi = str(dast.get("openapi", ""))
+    c.dast_auth_name, c.dast_auth_value = _auth_header(dast)
     c.host_port = _port(deploy, "deploy", "host_port")
     c.env = _env(deploy, "deploy")
     c.self_update = bool(deploy.get("self_update", False))
