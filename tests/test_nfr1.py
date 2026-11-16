@@ -2,8 +2,10 @@
 the check inside the staging session with Docker replaced by a recorder (planted plaintext included).
 Run: python3 -m unittest tests.test_nfr1 -v"""
 import base64
+import io
 import json
 import shutil
+import tarfile
 import tempfile
 import threading
 import tomllib
@@ -24,6 +26,21 @@ NFR1 = ('[nfr1]\nseed_path = "/internal/v1/test-mode/nfr1-probe"\n'
 BACKEND = ('[service]\nport = 8080\n[deploy]\nuser = "10001:10001"\nread_only = true\n'
            'mounts = [{ name = "files", target = "/var/lib/gmshield/files" }]\n'
            '[staging]\nservices = ["postgres", "redis"]\n' + NFR1)
+
+
+def volume_tar(*files: str) -> bytes:
+    """A `docker cp ... -` copy of a volume: its folder, plus one entry per name given."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        folder = tarfile.TarInfo("files")
+        folder.type = tarfile.DIRTYPE
+        tar.addfile(folder)
+        for name in files:
+            data = b"\x01ciphertext"
+            info = tarfile.TarInfo(f"files/{name}")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
 
 
 class ContractTest(unittest.TestCase):
@@ -134,6 +151,12 @@ class GateTest(unittest.TestCase):
         self.assertEqual(self.judge({"error": "pg_dump failed"}, outcome="error")[0], "failed")
         self.assertEqual(self.judge({}, outcome="skipped")[0], "skipped")
 
+    def test_a_store_without_the_seeded_data_blocks(self):
+        status, _, reasons = self.judge({"seeded": True, "read_back": True, "stores": self.STORES, "found_in": [],
+                                         "missing_evidence": ["volume 'files' (/data): it holds no file"]})
+        self.assertEqual(status, "failed")
+        self.assertIn("no trace of the seeded data in volume 'files' (/data): it holds no file", reasons)
+
 
 class StagingCheckTest(unittest.TestCase):
     """The check inside dast_staging, with Docker recorded and each store's content chosen by the test."""
@@ -142,7 +165,8 @@ class StagingCheckTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.cmds = []
-        self.content = {"pg": b"COPY vault_data_key ... \\x01ab\n", "rdb": b"REDIS0012...", "volume": b"tar...",
+        self.content = {"pg": b"COPY vault_probe ... " + PROBE_ID.encode() + b" \\x01ab\n", "rdb": b"REDIS0012...",
+                        "volume": volume_tar("owner/file/0.piece"),
                         "app": b'{"event":"request.completed"}\n', "postgres": b"LOG ready\n", "redis": b"Ready\n"}
         self.rc = {}
         self.readback = {"text": TEXT, "fileText": TEXT}
@@ -240,6 +264,23 @@ class StagingCheckTest(unittest.TestCase):
         self.assertEqual(self.cmds[pg][:3], ["docker", "exec", f"gmshield-ci-{RUN_ID}-staging-postgres"])
         self.assertEqual(self.cmds[vol][2], f"gmshield-ci-{RUN_ID}-app:/var/lib/gmshield/files")
 
+    def test_stores_without_the_seeded_data_fail_the_gate(self):
+        # "Not found" proves nothing where the probe's data never went (e.g. a files dir that is not the volume).
+        cases = {"volume": (volume_tar(), "volume 'files' (/var/lib/gmshield/files): it holds no file"),
+                 "pg": (b"COPY vault_probe ... (no rows)\n", f"database (pg_dump): the seeded id {PROBE_ID} is not in it")}
+        for kind, (content, missing) in cases.items():
+            with self.subTest(store=kind):
+                self.setUp()
+                self.content[kind] = content
+                rec = self.nfr1(self.run_for())
+                self.assertEqual(rec.status, "failed")
+                self.assertEqual(rec.metrics["missing_evidence"], [missing])
+                self.assertIn(f"no trace of the seeded data in {missing}", rec.reasons)
+
+    def test_a_clean_run_has_the_seeded_data_in_every_store_it_needs(self):
+        rec = self.nfr1(self.run_for())
+        self.assertEqual(rec.metrics["missing_evidence"], [])
+
     def test_the_redis_dump_stays_in_redis_own_data_folder(self):
         # SonarQube S5443: never a publicly writable directory such as /tmp.
         self.nfr1(self.run_for())
@@ -250,9 +291,9 @@ class StagingCheckTest(unittest.TestCase):
                              and "gmshield-nfr1" in part))
 
     def test_planted_plaintext_fails_the_gate_and_names_the_store(self):
-        planted = {"pg": ("INSERT ... '" + TEXT + "'").encode(),
+        planted = {"pg": ("INSERT ... '" + PROBE_ID + "', '" + TEXT + "'").encode(),
                    "rdb": b"REDIS" + base64.b64encode(b"z" + TEXT.encode()),
-                   "volume": b"tar..." + TEXT.encode(),
+                   "volume": volume_tar("owner/file/0.piece") + TEXT.encode(),
                    "app": b'{"event":"x","note":"' + TEXT.encode() + b'"}',
                    "redis": b"\\x" + TEXT.encode().hex().encode()}
         names = {"pg": "database (pg_dump) (plain)", "rdb": "Redis (RDB) (base64, base64url)",
