@@ -15,8 +15,9 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "deploy" / "data-credentials.sh"
 SECRET_KEYS = {
     "stack/.env": ["POSTGRES_PASSWORD", "REDIS_PROBE_PASSWORD", "QDRANT_API_KEY"],
-    "gmshield-ci/secrets/backend.env": ["GMSHIELD_DB_PASSWORD", "GMSHIELD_REDIS_PASSWORD", "GMSHIELD_FRONTEND_CREDENTIAL"],
-    "gmshield-ci/secrets/worker.env": ["GMSHIELD_REDIS_PASSWORD", "GMSHIELD_QDRANT_API_KEY"],
+    "gmshield-ci/secrets/backend.env": ["GMSHIELD_DB_PASSWORD", "GMSHIELD_REDIS_PASSWORD", "GMSHIELD_FRONTEND_CREDENTIAL",
+                                        "GMSHIELD_WORKER_CREDENTIAL"],
+    "gmshield-ci/secrets/worker.env": ["GMSHIELD_REDIS_PASSWORD", "GMSHIELD_QDRANT_API_KEY", "GMSHIELD_WORKER_CREDENTIAL"],
 }
 
 
@@ -57,9 +58,10 @@ class DataCredentialsTest(unittest.TestCase):
                 self.assertRegex(values[k], r"^[0-9a-f]{64}$", k)
                 self.assertNotIn(values[k], res.stdout + res.stderr)
                 seen.add(values[k])
-        # one credential per client: only the Qdrant key (Qdrant and the worker) and the frontend's service
-        # credential (backend and frontend) are shared, the latter outside this list
-        self.assertEqual(len(seen), 7)
+        # one credential per client: only the Qdrant key (Qdrant and the worker), the worker's credential (backend
+        # and worker) and the frontend's service credential (backend and frontend, the latter outside this list)
+        # are shared
+        self.assertEqual(len(seen), 8)
         self.assertEqual(env_file(self.base / "stack/.env")["QDRANT_API_KEY"],
                          env_file(self.base / "gmshield-ci/secrets/worker.env")["GMSHIELD_QDRANT_API_KEY"])
         self.assertEqual((self.base / "gmshield-ci/secrets").stat().st_mode & 0o777, 0o700)
@@ -185,6 +187,28 @@ class DataCredentialsTest(unittest.TestCase):
         res = self.run_script()
         self.assertEqual(res.returncode, 1)
         self.assertIn("GMSHIELD_FRONTEND_CREDENTIAL", res.stderr)
+        self.assertIn("differs", res.stderr)
+        self.assertNotIn("other-value", res.stdout + res.stderr)
+        self.assertNotIn(backend, res.stdout + res.stderr)
+
+    def test_the_worker_credential_is_one_secret_in_backend_and_worker_env(self):
+        res = self.ok()
+        backend = env_file(self.base / "gmshield-ci/secrets/backend.env")["GMSHIELD_WORKER_CREDENTIAL"]
+        worker_env = self.base / "gmshield-ci/secrets/worker.env"
+        self.assertRegex(backend, r"^[0-9a-f]{64}$")
+        self.assertEqual(env_file(worker_env)["GMSHIELD_WORKER_CREDENTIAL"], backend)
+        self.assertNotEqual(backend, env_file(self.base / "gmshield-ci/secrets/backend.env")["GMSHIELD_FRONTEND_CREDENTIAL"])
+        self.assertNotIn(backend, res.stdout + res.stderr)
+        self.assertIn("GMSHIELD_WORKER_CREDENTIAL: generated", res.stdout)
+        self.assertIn("GMSHIELD_WORKER_CREDENTIAL: copied from", res.stdout)
+        # A rerun keeps it; a worker.env whose credential differs is refused without printing either.
+        self.ok()
+        self.assertEqual(env_file(worker_env)["GMSHIELD_WORKER_CREDENTIAL"], backend)
+        worker_env.write_text(re.sub(r"GMSHIELD_WORKER_CREDENTIAL=.*", "GMSHIELD_WORKER_CREDENTIAL=other-value",
+                                     worker_env.read_text()))
+        res = self.run_script()
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("GMSHIELD_WORKER_CREDENTIAL", res.stderr)
         self.assertIn("differs", res.stderr)
         self.assertNotIn("other-value", res.stdout + res.stderr)
         self.assertNotIn(backend, res.stdout + res.stderr)

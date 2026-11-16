@@ -304,7 +304,9 @@ placeholders `GMSHIELD_GOOGLE_CLIENT_ID=` and `GMSHIELD_GOOGLE_CLIENT_SECRET=`, 
 hand and the script never overwrites; Story 1.10 adds `GMSHIELD_FRONTEND_CREDENTIAL`, one random secret
 written to both `backend.env` and `frontend.env`: the frontend sends it as `Authorization: Bearer` on
 every `/api/v1` call and the backend refuses any call without it; the script stops when the two files
-hold different values), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
+hold different values; Story 1.12 adds `GMSHIELD_WORKER_CREDENTIAL` the same way, written to both
+`backend.env` and `worker.env`: the worker sends it as `Authorization: Bearer` on every `/internal/v1`
+call), and the Redis accounts in `~/stack/redis-users.acl` (SHA-256
 hashes). Postgres: role `gmshield_backend` owns database `gmshield`, over `hostssl` with SCRAM only;
 the superuser `rpg` logs in only on the container's socket (`docker exec -u postgres postgres psql -U
 rpg`). Redis: TLS only, `default` off; `backend` on `gmshield:*`; `worker` limited to `AUTH HELLO PING
@@ -328,7 +330,8 @@ First deploy, in order (on roberto-server, as roberto, unless it says otherwise)
 
 1. `bash deploy/certs.sh issue`
 2. `bash deploy/data-credentials.sh` (rerun it after pulling a version that adds a secret, such as
-   Story 1.10's `GMSHIELD_FRONTEND_CREDENTIAL`, before deploying the backend that needs it)
+   Story 1.10's `GMSHIELD_FRONTEND_CREDENTIAL` or Story 1.12's `GMSHIELD_WORKER_CREDENTIAL`, before
+   deploying the backend that needs it)
 3. Add `GMSHIELD_ANTHROPIC_API_KEY=<key>` by hand to `~/gmshield-ci/secrets/worker.env` (mode 600 stays);
    the worker refuses to start without it. Fill `GMSHIELD_GOOGLE_CLIENT_ID` and
    `GMSHIELD_GOOGLE_CLIENT_SECRET` by hand in `~/gmshield-ci/secrets/backend.env`, from a Google OAuth
