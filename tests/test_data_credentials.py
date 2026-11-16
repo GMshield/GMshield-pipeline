@@ -82,6 +82,30 @@ class DataCredentialsTest(unittest.TestCase):
         self.assertEqual(env_file(b)["GMSHIELD_VAULT_MASTER_KEY"], kept)
         self.assertIn("GMSHIELD_VAULT_MASTER_KEY: already done", res.stdout)
 
+    def test_google_client_gets_empty_placeholders_that_are_never_overwritten(self):
+        b = self.base / "gmshield-ci/secrets/backend.env"
+        res = self.ok()
+        values = env_file(b)
+        for key in ("GMSHIELD_GOOGLE_CLIENT_ID", "GMSHIELD_GOOGLE_CLIENT_SECRET"):
+            self.assertEqual(values[key], "", key)
+            self.assertIn(f"{key}: placeholder added; enter it by hand", res.stdout)
+        # Still empty on a rerun: said again, and no second line.
+        res = self.ok()
+        self.assertIn("GMSHIELD_GOOGLE_CLIENT_ID: still empty; enter it by hand", res.stdout)
+        self.assertEqual(b.read_text().count("GMSHIELD_GOOGLE_CLIENT_ID="), 1)
+        # Entered by hand: kept as it is, never printed.
+        text = b.read_text().replace("GMSHIELD_GOOGLE_CLIENT_ID=\n", "GMSHIELD_GOOGLE_CLIENT_ID=123-abc.apps.googleusercontent.com\n")
+        text = text.replace("GMSHIELD_GOOGLE_CLIENT_SECRET=\n", "GMSHIELD_GOOGLE_CLIENT_SECRET=secret-entered-by-hand\n")
+        b.write_text(text)
+        before = self.digests()
+        res = self.ok()
+        self.assertEqual(self.digests(), before)
+        self.assertEqual(env_file(b)["GMSHIELD_GOOGLE_CLIENT_SECRET"], "secret-entered-by-hand")
+        self.assertIn("GMSHIELD_GOOGLE_CLIENT_SECRET: already done (entered by hand)", res.stdout)
+        self.assertNotIn("secret-entered-by-hand", res.stdout + res.stderr)
+        self.assertNotIn("123-abc", res.stdout + res.stderr)
+        self.assertEqual(b.stat().st_mode & 0o777, 0o600)
+
     def test_backend_settings_use_its_own_accounts_and_verified_tls(self):
         self.ok()
         b = env_file(self.base / "gmshield-ci/secrets/backend.env")
