@@ -2,7 +2,8 @@
 
 The poller calls `maybe_run` at the end of every poll, while it still holds the poll lock, so housekeeping
 never overlaps a pipeline run. It runs once a day inside a quiet window (default 03:00-06:00
-America/Sao_Paulo), or at the next idle poll when free disk drops below `min_free_percent`.
+America/Sao_Paulo), once after every server start (`after_boot_minutes` after boot, so the stack is up
+first), and at the next idle poll when free disk drops below `min_free_percent`.
 By hand: `python3 -m gmshield_ci clean --dry-run` shows what would go, `clean` does it.
 
 Removed, and what is always kept ([housekeeping] in tools.toml):
@@ -39,6 +40,7 @@ DEFAULTS = {
     "timezone": "America/Sao_Paulo",
     "quiet_hours": [3, 6],            # local [start, end) hour
     "min_free_percent": 15,           # below this, run at the next idle poll (at most once an hour)
+    "after_boot_minutes": 10,         # once after each boot, when the server has been up this long
     "build_cache_max_gb": 40,
     "keep_registry_tags": 3,
     "inactive_service_days": 30,
@@ -60,12 +62,15 @@ def log(msg: str) -> None:
 
 # ------------------------------------------------------------------ decisions (pure, unit-tested)
 
-def due(s: Settings, now: datetime, last: datetime | None, free_percent: float) -> str | None:
+def due(s: Settings, now: datetime, last: datetime | None, free_percent: float,
+        booted: datetime | None = None) -> str | None:
     """Why housekeeping should run now, or None."""
     if free_percent < opt(s, "min_free_percent"):
         if last is None or now - last >= LOW_DISK_GAP:
             return f"low disk ({free_percent:.0f}% free)"
         return None
+    if booted and (last is None or last < booted) and now - booted >= timedelta(minutes=opt(s, "after_boot_minutes")):
+        return "after boot"
     start, end = opt(s, "quiet_hours")
     if start <= now.astimezone(ZoneInfo(opt(s, "timezone"))).hour < end and (last is None or now - last >= DAILY_GAP):
         return "daily"
@@ -171,6 +176,16 @@ def protected_image_ids() -> set[str]:
     return ids
 
 
+def boot_time() -> datetime | None:
+    try:
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return datetime.fromtimestamp(int(line.split()[1]), timezone.utc)
+    except OSError:
+        pass
+    return None
+
+
 def free_percent(path: str) -> float:
     st = os.statvfs(path)
     return 100.0 * st.f_bavail / st.f_blocks
@@ -252,7 +267,7 @@ def run(s: Settings, reason: str = "manual", dry_run: bool = False) -> dict:
 def maybe_run(s: Settings) -> None:
     """Called by the poller with the poll lock held. Never raises: housekeeping must not break CI."""
     try:
-        reason = due(s, datetime.now(timezone.utc), last_run(s), disk_free(s))
+        reason = due(s, datetime.now(timezone.utc), last_run(s), disk_free(s), boot_time())
         if not reason:
             return
         log(f"starting ({reason})")

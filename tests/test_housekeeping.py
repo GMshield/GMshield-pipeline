@@ -37,6 +37,16 @@ class DueTest(unittest.TestCase):
         self.assertIsNotNone(hk.due(_settings(), afternoon, afternoon - timedelta(minutes=61), 10))
 
 
+    def test_once_after_each_boot_once_the_stack_had_time_to_start(self):
+        afternoon = NOW.replace(hour=18)                                          # outside the window
+        booted = afternoon - timedelta(minutes=30)
+        self.assertEqual(hk.due(_settings(), afternoon, afternoon - timedelta(days=2), 50, booted), "after boot")
+        self.assertEqual(hk.due(_settings(), afternoon, None, 50, booted), "after boot")
+        self.assertIsNone(hk.due(_settings(), afternoon, booted + timedelta(minutes=12), 50, booted))  # done
+        just_booted = afternoon - timedelta(minutes=3)
+        self.assertIsNone(hk.due(_settings(), afternoon, afternoon - timedelta(days=2), 50, just_booted))
+
+
 class RunFoldersTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
