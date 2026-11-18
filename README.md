@@ -196,6 +196,25 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 | Apply `gates.toml` changes to SonarQube | `python3 -m gmshield_ci sonar-setup` |
 | Follow the poller | `journalctl -u gmshield-ci -f` |
 | Pause / resume CI | `touch ~/gmshield-ci/PAUSED` / `rm ~/gmshield-ci/PAUSED` |
+| What housekeeping would remove now | `python3 -m gmshield_ci clean --dry-run` |
+| Run housekeeping now (waits for no run in progress) | `python3 -m gmshield_ci clean` |
+| Past housekeeping runs | `cat ~/gmshield-ci/state/housekeeping.jsonl` |
+
+### Housekeeping (disk space)
+
+Docker data, the run folders and the stack's data share the 150 GB encrypted volume, so the poller
+keeps Docker and old results from filling it (`gmshield_ci/housekeeping.py`, settings in
+`tools.toml` `[housekeeping]`). It runs at the end of a poll, while that poll still holds the lock, so
+it never overlaps or slows a pipeline run: once a day between 03:00 and 06:00 America/Sao_Paulo, or
+at the next idle poll (at most hourly) when the volume has less than 15% free.
+
+| What | Removed | Always kept |
+|---|---|---|
+| Build cache | everything above 40 GB, least recently used first | the layers recent builds use, so builds stay fast |
+| `localhost:5000/gmshield-<service>:<sha>` | older tags | `:prod`, images any container uses (also `-previous`, for rollback), the newest 3 |
+| `gmshield-ci/<service>:<sha>` | beyond the newest 3; all of them after 30 days with no new image | the newest 3 of an active service |
+| Other Docker images | unused and created more than 90 days ago, plus dangling ones | pinned images (`tools.toml` `[images]`, `infra/` and `sonarqube/` compose files), images any container uses |
+| Run folders | older than 30 days | the newest 20 per repo and branch, `latest`, the run in `state/state.json`, runs a release links to, `history.jsonl` |
 
 The local mirrors in `~/gmshield-ci/mirrors/` are force-synced on every poll, so their `develop`
 and `main` always equal GitHub's. Only `develop` and `main` are ever built; pull requests and forks

@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import github, gitops, report, sonar, stages
+from . import github, gitops, housekeeping, report, sonar, stages
 from .config import RUNNER_DIR, Contract, ContractError, Repo, Settings, load_contract
 from .dockerops import Docker, capture, cleanup_label, prune_images, sh
 
@@ -326,6 +326,7 @@ def poll(s: Settings) -> int:
                     log(f"{repo.name}/{branch}: {last[:8] if last else 'new'} -> {sha[:8]}")
                     run = process(s, repo, branch, mirror, last, sha)
                     _record(state, state_file, run)
+            housekeeping.maybe_run(s)         # daily in the quiet window, or when the disk runs low; never raises
         finally:
             sonar.Session.close()             # stop SonarQube if this poll started it
         return 0
