@@ -39,13 +39,14 @@ zap_spider_minutes = 2
 max_intermediate_commits = 20  # earlier commits in one push get a light scan each
 keep_images_per_service = 3
 
-# Housekeeping (gmshield_ci/housekeeping.py): run by the poller once a day in the quiet window, only
-# while no pipeline run is in progress, or at the next idle poll when free disk drops below
+# Housekeeping (gmshield_ci/housekeeping.py): run by the poller once a day in the quiet window and once
+# after every server start, only while no pipeline run is in progress, or at the next idle poll when free disk drops below
 # min_free_percent. By hand: python3 -m gmshield_ci clean [--dry-run].
 [housekeeping]
 timezone = "America/Sao_Paulo"
 quiet_hours = [3, 6]           # local start (inclusive) and end (exclusive) hour
 min_free_percent = 15
+after_boot_minutes = 10        # also once after every server start, this long after boot
 build_cache_max_gb = 40        # least recently used cache goes first; recent build layers stay
 keep_registry_tags = 3         # localhost:5000/gmshield-<service>:<sha>, besides :prod and images in use
 inactive_service_days = 30     # gmshield-ci/<service> with no new image for this long loses all of them

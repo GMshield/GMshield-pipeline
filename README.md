@@ -205,8 +205,9 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 Docker data, the run folders and the stack's data share the 150 GB encrypted volume, so the poller
 keeps Docker and old results from filling it (`gmshield_ci/housekeeping.py`, settings in
 `tools.toml` `[housekeeping]`). It runs at the end of a poll, while that poll still holds the lock, so
-it never overlaps or slows a pipeline run: once a day between 03:00 and 06:00 America/Sao_Paulo, or
-at the next idle poll (at most hourly) when the volume has less than 15% free.
+it never overlaps or slows a pipeline run: once a day between 03:00 and 06:00 America/Sao_Paulo, once
+after every server start (10 minutes after boot, so the stack is up first), and at the next idle
+poll (at most hourly) when the volume has less than 15% free.
 
 | What | Removed | Always kept |
 |---|---|---|
