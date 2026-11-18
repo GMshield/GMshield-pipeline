@@ -12,7 +12,8 @@
 # - The registry keeps 127.0.0.1:5000 (the pipeline pushes from the host) on a network of its own.
 # - Postgres, Redis and Qdrant serve certificates of the private authority (deploy/certs.sh) and
 #   require credentials (deploy/data-credentials.sh): no data service publishes a host port.
-# - Every image is pinned by version and digest, released at least two weeks before 2026-11-14.
+# - Every image is pinned by version and digest, released at least two weeks before 2026-11-14 (Qdrant 1.20.0:
+#   released 2026-10-21, pinned 2026-11-18).
 # - Container names stay postgres, redis, qdrant and registry (deploy/encrypt-volume.sh checks them).
 # - All containers run inside containers.slice (Docker's cgroup-parent), capped per service below.
 name: rpg
@@ -70,7 +71,10 @@ services:
       start_interval: 2s
 
   qdrant:              # vectors for retrieval; TLS, one API key (held by the worker)
-    image: qdrant/qdrant:v1.15.4@sha256:6ac4807063bbecddca0250bfbcff52acf18c22263b904d12919349e6d0a408f1
+    # 1.20.0 (AD-10, Story 2.1): sparse vectors with the idf modifier and tenant indexes, as the worker's
+    # qdrant-client 1.20.0 expects. Moved from 1.15.4 while the volume held no collection (2026-11-18): Qdrant
+    # upgrades stored data one minor version at a time, so a later move with data must step through each one.
+    image: qdrant/qdrant:v1.20.0@sha256:9bfc89f9914fc14876a88c05270685921a55b8877b254a98bcc1cc2f0a424cd2
     container_name: qdrant
     restart: unless-stopped
     environment:
