@@ -5,6 +5,7 @@
   python3 -m gmshield_ci status                  # last result per repo and branch
   python3 -m gmshield_ci dashboard [--once]      # live status screen (runs on tty1, see deploy/)
   python3 -m gmshield_ci selftest                # is the server ready?
+  python3 -m gmshield_ci clean [--dry-run]       # housekeeping now: old Docker images, build cache, old runs
   python3 -m gmshield_ci sonar-setup             # one-time SonarQube setup (idempotent)
   python3 -m gmshield_ci sonar-delete KEY        # remove a SonarQube project (tests)
 """
@@ -15,7 +16,7 @@ import json
 import sys
 import urllib.request
 
-from . import __version__, dashboard, github, pipeline, sonar
+from . import __version__, dashboard, github, housekeeping, pipeline, sonar
 from .config import load_settings
 from .dockerops import capture
 
@@ -81,6 +82,20 @@ def sonar_delete(key: str) -> int:
         sonar.Session.close()
 
 
+def clean(dry_run: bool) -> int:
+    s = load_settings()
+    if dry_run:                                   # read-only: no lock needed
+        r = housekeeping.run(s, "manual", dry_run=True)
+    else:
+        with pipeline.single_instance(s) as ok:
+            if not ok:
+                print("a pipeline run is in progress; try again when it ends")
+                return 1
+            r = housekeeping.run(s, "manual")
+    print(json.dumps(r, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="gmshield-ci", description=f"GMshield CI/CD {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -95,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     db.add_argument("--interval", type=float, default=5.0, help="seconds between redraws")
     sub.add_parser("selftest")
     sub.add_parser("sonar-setup")
+    c = sub.add_parser("clean", help="housekeeping now (see gmshield_ci/housekeeping.py)")
+    c.add_argument("--dry-run", action="store_true", help="only list what would be removed")
     d = sub.add_parser("sonar-delete")
     d.add_argument("key")
     a = p.parse_args(argv)
@@ -108,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         return dashboard.run(load_settings(), once=a.once, interval=max(1.0, a.interval))
     if a.cmd == "sonar-setup":
         return sonar_setup()
+    if a.cmd == "clean":
+        return clean(a.dry_run)
     if a.cmd == "sonar-delete":
         return sonar_delete(a.key)
     return selftest()

@@ -38,6 +38,7 @@ class Settings:
     semgrep_rulesets: list[str]
     limits: dict
     gates: dict
+    housekeeping: dict = field(default_factory=dict)   # tools.toml [housekeeping]
 
     @property
     def mirrors(self) -> Path: return self.home / "mirrors"
@@ -81,7 +82,7 @@ def load_settings() -> Settings:
         ci_slice=cfg.get("ci_slice", "ci.slice"),
         repos=repos, images=tools["images"],
         semgrep_rulesets=tools.get("semgrep", {}).get("rulesets", ["p/default"]),
-        limits=tools.get("limits", {}), gates=gates,
+        limits=tools.get("limits", {}), gates=gates, housekeeping=tools.get("housekeeping", {}),
     )
 
 
