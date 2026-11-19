@@ -112,7 +112,9 @@ secret "$W" GMSHIELD_REDIS_PASSWORD
 setting "$W" GMSHIELD_QDRANT_URL https://qdrant:6333
 copied "$STACK_ENV" QDRANT_API_KEY "$W" GMSHIELD_QDRANT_API_KEY
 copied "$B" GMSHIELD_WORKER_CREDENTIAL "$W" GMSHIELD_WORKER_CREDENTIAL
-has "$W" GMSHIELD_ANTHROPIC_API_KEY || echo "    note: GMSHIELD_ANTHROPIC_API_KEY is not set; the worker refuses to start without it (add it by hand)"
+# Story 2.10: the model provider's key, entered by hand. Azure OpenAI is the active provider: its key comes with the
+# resource's v1 URL. The worker refuses to start without at least one provider's key, and an Azure key without its URL.
+{ has "$W" GMSHIELD_AZURE_OPENAI_API_KEY && has "$W" GMSHIELD_AZURE_OPENAI_BASE_URL; } || echo "    note: GMSHIELD_AZURE_OPENAI_API_KEY and GMSHIELD_AZURE_OPENAI_BASE_URL (https://<resource>.openai.azure.com/openai/v1/) are not both set; add them by hand"
 
 F=$SECRETS/frontend.env
 echo "==> 4/5 The frontend ($F)"
