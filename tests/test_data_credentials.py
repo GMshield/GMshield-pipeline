@@ -85,6 +85,19 @@ class DataCredentialsTest(unittest.TestCase):
         self.assertEqual(env_file(b)["GMSHIELD_VAULT_MASTER_KEY"], kept)
         self.assertIn("GMSHIELD_VAULT_MASTER_KEY: already done", res.stdout)
 
+    def test_the_azure_openai_key_and_url_are_named_until_both_are_entered_by_hand(self):
+        res = self.ok()
+        self.assertIn("note: GMSHIELD_AZURE_OPENAI_API_KEY and GMSHIELD_AZURE_OPENAI_BASE_URL", res.stdout)
+        self.assertNotIn("GMSHIELD_ANTHROPIC_API_KEY", res.stdout)
+        w = self.base / "gmshield-ci/secrets/worker.env"
+        self.assertNotIn("GMSHIELD_AZURE_OPENAI_API_KEY", env_file(w))
+        w.write_text(w.read_text() + "GMSHIELD_AZURE_OPENAI_API_KEY=azure-key-entered-by-hand\n")
+        self.assertIn("GMSHIELD_AZURE_OPENAI_BASE_URL", self.ok().stdout)
+        w.write_text(w.read_text() + "GMSHIELD_AZURE_OPENAI_BASE_URL=https://res.openai.azure.com/openai/v1/\n")
+        res = self.ok()
+        self.assertNotIn("GMSHIELD_AZURE_OPENAI", res.stdout)
+        self.assertNotIn("azure-key-entered-by-hand", res.stdout + res.stderr)
+
     def test_google_client_gets_empty_placeholders_that_are_never_overwritten(self):
         b = self.base / "gmshield-ci/secrets/backend.env"
         res = self.ok()
