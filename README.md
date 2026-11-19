@@ -352,8 +352,13 @@ First deploy, in order (on roberto-server, as roberto, unless it says otherwise)
 2. `bash deploy/data-credentials.sh` (rerun it after pulling a version that adds a secret, such as
    Story 1.10's `GMSHIELD_FRONTEND_CREDENTIAL` or Story 1.12's `GMSHIELD_WORKER_CREDENTIAL`, before
    deploying the backend that needs it)
-3. Add `GMSHIELD_ANTHROPIC_API_KEY=<key>` by hand to `~/gmshield-ci/secrets/worker.env` (mode 600 stays);
-   the worker refuses to start without it. Fill `GMSHIELD_GOOGLE_CLIENT_ID` and
+3. Add `GMSHIELD_AZURE_OPENAI_API_KEY=<key>` and
+   `GMSHIELD_AZURE_OPENAI_BASE_URL=https://<resource>.openai.azure.com/openai/v1/` by hand to
+   `~/gmshield-ci/secrets/worker.env` (mode 600 stays). From Story 2.10 each model provider's key is optional
+   (`GMSHIELD_ANTHROPIC_API_KEY` and `GMSHIELD_OPENAI_API_KEY` are the others), the worker refuses to start
+   without at least one, and an Azure key without its base URL is refused; the backend's
+   `GMSHIELD_MODEL_PROVIDER` (default `azure-openai`) chooses the provider. Remove a placeholder key the worker
+   does not really hold: the worker states every provider it has a key for. Fill `GMSHIELD_GOOGLE_CLIENT_ID` and
    `GMSHIELD_GOOGLE_CLIENT_SECRET` by hand in `~/gmshield-ci/secrets/backend.env`, from a Google OAuth
    client whose redirect URI is the backend contract's `GMSHIELD_PUBLIC_URL` followed by
    `/auth/google/callback` (`http://localhost:3000/auth/google/callback`, through the SSH tunnel to the
