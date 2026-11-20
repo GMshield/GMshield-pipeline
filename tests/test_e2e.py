@@ -217,6 +217,10 @@ class ArgsTest(Base):
         self.assertEqual((d["image"], d["network"]), (e2e.driver_image(self.s), "container:front"))
         self.assertRegex(d["image"], r"^gmshield-ci/e2e-driver:[0-9a-f]{12}$")
         self.assertIn((sess.dir, "/out", "rw"), d["mounts"])
+        # an owner-only home of the run for Chromium, never the shared /tmp
+        self.assertEqual(d["env"]["HOME"], stages.CONTAINER_HOME)
+        self.assertIn((sess.work / "home" / "e2e-driver", stages.CONTAINER_HOME, "rw"), d["mounts"])
+        self.assertEqual((sess.work / "home" / "e2e-driver").stat().st_mode & 0o777, 0o700)
 
 
 class StandInOllamaTest(unittest.TestCase):
