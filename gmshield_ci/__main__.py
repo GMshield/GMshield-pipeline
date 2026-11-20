@@ -8,6 +8,7 @@
   python3 -m gmshield_ci clean [--dry-run]       # housekeeping now: old Docker images, build cache, old runs
   python3 -m gmshield_ci sonar-setup             # one-time SonarQube setup (idempotent)
   python3 -m gmshield_ci sonar-delete KEY        # remove a SonarQube project (tests)
+  python3 -m gmshield_ci sm2 [--skip-burst]      # SM-2: the SRD question set against production (Story 2.9)
 """
 from __future__ import annotations
 
@@ -15,8 +16,9 @@ import argparse
 import json
 import sys
 import urllib.request
+from pathlib import Path
 
-from . import __version__, dashboard, github, housekeeping, pipeline, sonar
+from . import __version__, dashboard, github, housekeeping, pipeline, sm2, sonar
 from .config import load_settings
 from .dockerops import capture
 
@@ -114,6 +116,15 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--dry-run", action="store_true", help="only list what would be removed")
     d = sub.add_parser("sonar-delete")
     d.add_argument("key")
+    q = sub.add_parser("sm2", help="SM-2: ask the SRD question set through the backend (see gmshield_ci/sm2.py)")
+    q.add_argument("--session-file", type=Path, default=Path.home() / ".config" / "gmshield" / "sm2-session",
+                   help="the session token (mode 600); rewritten after each renewal")
+    q.add_argument("--backend-container", default="gmshield-backend",
+                   help="the backend container (gm27-backend for a temporary develop stack)")
+    q.add_argument("--network", default="gmshield-app", help="the network the backend is reached on (gm27-app)")
+    q.add_argument("--questions", type=Path, default=sm2.QUESTIONS, help="the question set")
+    q.add_argument("--skip-burst", action="store_true",
+                   help="no ingestion burst (a dry run: the burst gate is then not met)")
     a = p.parse_args(argv)
     if a.cmd == "poll":
         return pipeline.poll(load_settings())
@@ -129,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         return clean(a.dry_run)
     if a.cmd == "sonar-delete":
         return sonar_delete(a.key)
+    if a.cmd == "sm2":
+        return sm2.run(a.session_file, backend_container=a.backend_container, network=a.network,
+                       questions_file=a.questions, skip_burst=a.skip_burst)
     return selftest()
 
 

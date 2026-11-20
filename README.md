@@ -199,6 +199,60 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 | What housekeeping would remove now | `python3 -m gmshield_ci clean --dry-run` |
 | Run housekeeping now (waits for no run in progress) | `python3 -m gmshield_ci clean` |
 | Past housekeeping runs | `cat ~/gmshield-ci/state/housekeeping.jsonl` |
+| SM-2: sourced answers on the SRD (below) | `python3 -m gmshield_ci sm2 --session-file ~/.config/gmshield/sm2-session` |
+
+### SM-2: sourced answers on the SRD (Story 2.9)
+
+`python3 -m gmshield_ci sm2` asks the fixed SRD 5.2.1 question set (`quality/sm2/questions.json`: 50
+questions, 25 in Portuguese and 25 in English, each with short answer phrases and their pages) through
+the backend's public API, as the signed-in GM, and records four gates:
+
+| Gate | Passes when |
+|---|---|
+| Sourced answers (SM-2) | at least 45 of 50 answers cite a passage that holds one of the question's phrases |
+| First words (NFR-14) | at least 45 of 50 answers send their first words within 5 s of the turn's creation |
+| References open | every reference of every answer opens: its page view, and its picture when the page has one |
+| Burst during ingestion (NFR-17) | 5 questions asked at once while a generated 60-page PDF is `processing` all end in `done` |
+
+Exit status: 0 when all four pass, 1 when one fails, 2 when the run cannot start or must stop. A
+refused start (no session, no accepted source, indexing still running; exit 2 before any question)
+writes nothing; a stop mid-run (a refused renewal, the session ended, Ctrl-C) writes a partial result.
+
+A cited passage is rebuilt from the reference's page view (the lines its boxes overlap, or its range of
+a text page's text, plus its part on the next page) and normalised (NFKC, casefold, whitespace
+collapsed, a hyphen at a line end joined) before the phrases are looked for: passage ids change at
+every ingestion, so the set never names them. Each question is given 300 s, then its turn is stopped
+(`timeout`). The burst material is uploaded into the current campaign, never accepted, and discarded
+once it needs review (or failed); if it is still processing after an hour, the run says so and it is
+discarded by hand in the library.
+
+Before a run:
+
+1. The SRD is accepted in the current campaign's scope and `GET /api/v1/conversations/current` shows
+   `indexing: null` (the runner refuses to start otherwise).
+2. Dalton signs in with Google in the browser and saves the session cookie's token, the part before
+   the last `.`, on the server: `install -D -m 600 /dev/null ~/.config/gmshield/sm2-session`, then paste
+   it into that file. The runner renews the session at the start and before it is due, and writes each
+   new token back to the file (mode 600).
+3. Close the GMshield browser tab without signing out, and do not use the app during the run: after the
+   runner renews, a browser call with the old token ends the session the two share.
+4. Start it detached, as `docs/CI-CD-RESULTS.md` shows (`setsid nohup python3 -m gmshield_ci sm2 ... >
+   ~/sm2-run.log 2>&1 &`). It takes about 50 questions times the answer time (each up to 300 s), plus
+   the burst, plus up to an hour waiting for the burst material to need review before it is discarded.
+
+After the run, delete the session file (`rm ~/.config/gmshield/sm2-session`) or sign out in the
+browser: the token stays valid until its idle timeout.
+
+Options: `--backend-container` and `--network` (defaults `gmshield-backend`, `gmshield-app`;
+`gm27-backend` and `gm27-app` for a temporary develop stack), `--questions` (another set, for a
+trial), `--skip-burst` (no burst; the burst gate is then not met). The backend's address and the
+frontend's service credential are read from the container (`docker inspect`) at run time; the
+credential is never printed or written.
+
+The result goes to `~/gmshield-ci/artifacts/quality/sm2/<UTC yyyy-mm-dd-HHMMSS>-<backend release>/`:
+`result.json` (per question: turn id, verdict and reason, timings, cited references with their pages,
+section paths and HTTP statuses; the gates; the release tags of the backend, frontend and worker) and
+`summary.md`. It holds no answer text and no passage text. Housekeeping never removes these folders.
 
 ### Housekeeping (disk space)
 
