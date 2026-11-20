@@ -57,7 +57,7 @@ FRONTEND_PORT = 3000
 OLLAMA_PORT = 11434
 QDRANT_PORT = 6333
 # Contract variables that name a production address; the test mode reads them when set, so they point at the stand-in.
-STAND_IN_ENV = {"GMSHIELD_OLLAMA_URL": f"http://stand-in-ollama:{OLLAMA_PORT}"}
+STAND_IN_ENV = {"GMSHIELD_OLLAMA_URL": f"http://stand-in-ollama:{OLLAMA_PORT}"}  # NOSONAR: test-mode stand-in on the run's internal network, which has no TLS
 DEFAULT_LIMIT = 1200
 USERNAME = "e2e_gm"
 PDF_NAME = "e2e-wardens-of-the-fen.pdf"
@@ -243,9 +243,9 @@ def ensure_driver_image(sess: Session, log: Path) -> str:
 def driver_args(sess: Session, frontend: str, inputs: Path, messages: Path) -> dict:
     return {"name": "e2e-driver", "image": driver_image(sess.s),
             "args": ["python3", "-I", "/e2e/driver.py", "/in/config.json"],
-            "network": f"container:{frontend}", "env": {"HOME": "/tmp"},
+            "network": f"container:{frontend}", "env": {"HOME": stages.CONTAINER_HOME},
             "mounts": [(inputs, "/in", "ro"), (QUALITY, "/e2e", "ro"), (messages, "/messages/en.json", "ro"),
-                       (sess.dir, "/out", "rw")]}
+                       (sess.dir, "/out", "rw"), stages.private_home(sess, "e2e-driver")]}
 
 
 def _start(sess: Session, spec: dict, network: str | None, log: Path) -> str:

@@ -97,10 +97,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv: list[str]) -> int:
     port = int(argv[1]) if len(argv) > 1 else PORT
-    server = ThreadingHTTPServer(("", port), Handler)
+    server = ThreadingHTTPServer(("", port), Handler)  # NOSONAR: test-mode stand-in on the run's internal network, which has no TLS
     print(f"stand-in Ollama listening on {port}", file=sys.stderr, flush=True)
     try:
-        server.serve_forever()
+        server.serve_forever()  # NOSONAR: plain HTTP on the run's internal network, which has no TLS
     except KeyboardInterrupt:
         pass
     return 0
