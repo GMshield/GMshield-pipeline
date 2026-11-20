@@ -1,0 +1,48 @@
+# GMshield pipeline contract (see GMshield-pipeline/templates/pipeline.toml for every option).
+
+[service]
+name = "worker"
+port = 0                    # the worker opens no listening port: no staging, no DAST
+health_path = "/"           # unused without a port; health is the image's HEALTHCHECK
+
+[build]
+test_target = "test"         # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"
+openapi = ""                 # no HTTP surface to scan
+
+[deploy]
+host_port = 0               # the worker opens no port
+# Story 1.6 (AD-14): gmshield-work (the backend at http://gmshield-backend:8080, Redis, later Qdrant),
+# gmshield-model (Ollama on the network's gateway), gmshield-outbound (the model provider).
+networks = ["gmshield-work", "gmshield-model", "gmshield-outbound"]
+# Story 2.1: Ollama on the gmshield-model gateway (deploy/secure-ollama.sh), for the embeddings. Qdrant's URL and
+# key are secrets, in worker.env (deploy/data-credentials.sh).
+env = { GMSHIELD_OLLAMA_URL = "http://172.30.5.1:11434" }
+certs = true                # ~/gmshield-ci/certs/worker/ca.crt at /run/gmshield/certs: TLS to Redis (Qdrant later)
+read_only = true
+user = "10001:10001"
+cap_drop = ["ALL"]
+tmpfs = ["/tmp"]
+# Story 1.22 (measured on roberto-server 2026-11-18; docs/INFRASTRUCTURE.md, "Measured ingestion"):
+# memory = the largest peak outside page cache, 3,257 MiB (the SRD layout child's 3,103 MiB `childMaxRssKib`
+# plus the worker's 154 MiB `workerMaxRssKib`), x 1.3, rounded up to 256m. The container's memory.peak
+# (3,930 MiB) also counts page cache, which the kernel frees under a cap (Dalton, 2026-11-18). With Ollama's
+# anonymous memory (about 0.7 GB) the cap comes to 5,069 of ai.slice's 5,093 MiB: a thin margin, but the measured
+# worst case is about 3.9 GB, and at the slice's limit the kernel kills the worker before Ollama (OOMScoreAdjust
+# -500), as the cap would. Revisit when Ollama grows (Epic 2 embeddings).
+# cpus = 2, ai.slice's two threads: layout and OCR run 2 threads each (layout reached 3 CPUs uncapped).
+memory = "4352m"
+cpus = 2
+slice = "ai.slice"
+# Decrypted material lives only in the work folder (AD-21): a named volume, gmshield-worker-work,
+# in Docker's data on the encrypted volume (AD-24). The worker empties it at start.
+mounts = [{ name = "work", target = "/var/lib/gmshield-worker/work" }]
+
+[test]
+# Story 1.12: the integration tests (the lanes on the work streams, as the worker's production Redis account,
+# with the internal API stood in) run from the Dockerfile's `integration` stage with GMSHIELD_MODE=test, beside a
+# throwaway Redis at the test-mode host (redis:6379); exit 0 passes.
+target = "integration"
+services = ["redis"]

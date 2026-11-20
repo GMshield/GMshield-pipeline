@@ -9,6 +9,7 @@
   python3 -m gmshield_ci sonar-setup             # one-time SonarQube setup (idempotent)
   python3 -m gmshield_ci sonar-delete KEY        # remove a SonarQube project (tests)
   python3 -m gmshield_ci sm2 [--skip-burst]      # SM-2: the SRD question set against production (Story 2.9)
+  python3 -m gmshield_ci e2e                     # the end-to-end test of the latest develop images (Story 2.9)
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from . import __version__, dashboard, github, housekeeping, pipeline, sm2, sonar
+from . import __version__, dashboard, e2e, github, housekeeping, pipeline, sm2, sonar
 from .config import load_settings
 from .dockerops import capture
 
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--questions", type=Path, default=sm2.QUESTIONS, help="the question set")
     q.add_argument("--skip-burst", action="store_true",
                    help="no ingestion burst (a dry run: the burst gate is then not met)")
+    sub.add_parser("e2e", help="the end-to-end test with the fake model, latest develop images (gmshield_ci/e2e.py)")
     a = p.parse_args(argv)
     if a.cmd == "poll":
         return pipeline.poll(load_settings())
@@ -140,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         return clean(a.dry_run)
     if a.cmd == "sonar-delete":
         return sonar_delete(a.key)
+    if a.cmd == "e2e":
+        return e2e.standalone(load_settings())
     if a.cmd == "sm2":
         return sm2.run(a.session_file, backend_container=a.backend_container, network=a.network,
                        questions_file=a.questions, skip_burst=a.skip_burst)

@@ -348,17 +348,17 @@ def _service_logs(names: list[str], containers: list[str], outdir: Path) -> list
     return [f"{outdir.name}/{svc}.log" for svc in names if (outdir / f"{svc}.log").exists()]
 
 
-def staging_certs(run: "Run", aliases: list[str]) -> Path | None:
+def staging_certs(run: "Run", aliases: list[str], name: str = "staging", log: Path | None = None) -> Path | None:
     """A throwaway CA and a leaf certificate for the app, made on the host with openssl for this run only.
 
     The CA key never leaves the run's work folder; the returned folder holds ca.crt, tls.crt, tls.key.
     The private authority of production (Story 1.6) never enters the CI slice.
     """
-    base = run.work / "staging-ca"
-    out = run.work / "staging-certs"
+    base = run.work / f"{name}-ca"
+    out = run.work / f"{name}-certs"
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
     out.mkdir(parents=True, exist_ok=True)
-    log = run.dir / "dast" / "staging.log"
+    log = log or run.dir / "dast" / "staging.log"
     ext = base / "leaf.ext"
     ext.write_text(f"subjectAltName={','.join(f'DNS:{a}' for a in aliases)}\nbasicConstraints=CA:FALSE\n"
                    "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")
@@ -383,15 +383,16 @@ def staging_certs(run: "Run", aliases: list[str]) -> Path | None:
     return out
 
 
-def _staging_volumes(run: "Run", log: Path) -> tuple[list[str], str | None]:
+def _staging_volumes(run: "Run", log: Path, contract=None) -> tuple[list[str], str | None]:
     """Create the run's throwaway volume for each mount, labelled so crash cleanup removes it too.
 
     Like production, Docker fills a new volume from the image's folder at the target, owner included,
     so an app running as its own user can write to it.
     """
+    c = contract or run.contract
     made: list[str] = []
-    for m in run.contract.mounts:
-        name = volume_name(run.contract, m, run.id)
+    for m in c.mounts:
+        name = volume_name(c, m, run.id)
         if sh(["docker", "volume", "create", *run.docker.labels, name], log, 60) != 0:
             return made, f"cannot create the staging volume for mount '{m.name}'"
         made.append(name)

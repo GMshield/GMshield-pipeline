@@ -1,0 +1,63 @@
+# GMshield pipeline contract (see GMshield-pipeline/templates/pipeline.toml for every option).
+# Active: the Dockerfile has the stages `test`, `test-reports`, `integration` and `production`.
+
+[service]
+name = "backend"
+port = 8080                    # HTTP port inside the container (0 = no HTTP, no DAST)
+health_path = "/actuator/health"
+
+[build]
+test_target = "test"         # Dockerfile stage that runs the unit tests
+
+[dast]
+path = "/"
+openapi = "/v3/api-docs/public"   # ZAP API scan of the public contract (committed as openapi/public.json)
+# Story 1.10: every /api/v1 request needs the frontend's service credential, else 401 service.unauthenticated
+# before any controller. The staging backend runs in test mode, whose credential is this fixed public value
+# (application-test-mode.yaml), so ZAP sends it on every request and scans the controllers themselves.
+auth_header = "Authorization: Bearer gmshield-test-mode-frontend-credential-not-a-secret"
+
+[deploy]
+host_port = 0                  # no host port: the frontend and the worker reach it on gmshield-app and gmshield-work
+# Story 1.9: the frontend's origin as the browser sees it; Google redirects to <it>/auth/google/callback.
+# Through Dalton's SSH tunnel until the public domain (Cloudflare Tunnel) replaces it. The Google client id
+# and secret are secrets: ~/gmshield-ci/secrets/backend.env, entered by hand.
+env = { GMSHIELD_PUBLIC_URL = "http://localhost:3000" }
+# Story 1.6 (AD-14): created on the first network (the health probe joins it), then connected to the rest.
+# Postgres is on gmshield-data, Redis on gmshield-work; gmshield-outbound alone reaches the internet.
+networks = ["gmshield-app", "gmshield-data", "gmshield-work", "gmshield-outbound"]
+certs = true                   # ~/gmshield-ci/certs/backend/ca.crt at /run/gmshield/certs: TLS to Postgres and Redis
+read_only = true
+user = "10001:10001"
+cap_drop = ["ALL"]
+tmpfs = ["/tmp"]
+# Story 1.22 (measured on roberto-server 2026-11-18; docs/INFRASTRUCTURE.md, "Measured ingestion"):
+# memory = the backend's docker stats peak, 1,160 MiB during the 650 MB scan upload, x 1.3, rounded up to
+# 256m. The JVM's heap ceiling is 75% of it (1,152 MiB), and G1 stays the collector at this size (checked).
+# cpus = 2: the measured peak was 0.5 CPU, but start-up and the JVM's GC and compiler threads use more.
+memory = "1536m"
+cpus = 2
+# Story 1.7: the encrypted file store (GMSHIELD_FILES_DIR). Production: the named volume
+# gmshield-backend-files on the encrypted volume; staging: a throwaway volume of the run.
+mounts = [{ name = "files", target = "/var/lib/gmshield/files" }]
+
+[staging]
+# The develop pipeline's throwaway copy (active DAST) runs with GMSHIELD_MODE=test, which reads the
+# fixed connections in application-test-mode.yaml: a throwaway Postgres and Redis on the run's network.
+services = ["postgres", "redis"]
+
+[test]
+# Story 1.11: the integration tests (cross-owner tests of the library, the starter library's rollback with the
+# account; Story 1.12: the jobs, their streams, claims, lapses and a flushed Redis; Story 1.13: the uploads, their
+# lease, completion and sweep) run from the Dockerfile's `integration` stage with GMSHIELD_MODE=test, beside a throwaway PostgreSQL
+# and Redis at the test-mode hosts (application-test-mode.yaml); exit 0 passes.
+target = "integration"
+services = ["postgres", "redis"]
+
+[nfr1]
+# Story 1.7 (NFR-1): inside the staging session, the develop pipeline stores a random text through
+# this test-mode-only route, reads it back, then searches pg_dump, the file-store volume, a Redis RDB
+# and every log for it: plain UTF-8; Base64 and Base64url at every alignment, also with "/" escaped as
+# "\/"; hex in lower and upper case. Found anywhere, or not read back: the release is blocked.
+seed_path = "/internal/v1/test-mode/nfr1-probe"
+readback_path = "/internal/v1/test-mode/nfr1-probe/{id}"

@@ -21,6 +21,9 @@ push to develop ──► Resolve flow
                     ► NFR-1 at rest          (same session, before teardown: a random known text stored
                                               through [nfr1], read back, then searched for in pg_dump,
                                               a Redis RDB, each mounted volume and every log)
+                    ► End-to-end             (backend, frontend and worker develop runs only: the three
+                                              apps together in test mode with the fake model, driven by
+                                              a real browser; see "End-to-end test" below)
                     ► Quality gate ──pass──► code is promotable (recorded by its git tree)
                                              + GitHub status gmshield-ci/develop = success
 
@@ -200,6 +203,7 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 | Run housekeeping now (waits for no run in progress) | `python3 -m gmshield_ci clean` |
 | Past housekeeping runs | `cat ~/gmshield-ci/state/housekeeping.jsonl` |
 | SM-2: sourced answers on the SRD (below) | `python3 -m gmshield_ci sm2 --session-file ~/.config/gmshield/sm2-session` |
+| End-to-end test of the latest develop images (below) | `python3 -m gmshield_ci e2e` |
 
 ### SM-2: sourced answers on the SRD (Story 2.9)
 
@@ -253,6 +257,63 @@ The result goes to `~/gmshield-ci/artifacts/quality/sm2/<UTC yyyy-mm-dd-HHMMSS>-
 `result.json` (per question: turn id, verdict and reason, timings, cited references with their pages,
 section paths and HTTP statuses; the gates; the release tags of the backend, frontend and worker) and
 `summary.md`. It holds no answer text and no passage text. Housekeeping never removes these folders.
+
+### End-to-end test with the fake model (Story 2.9)
+
+Every full develop run of GMshield-backend, -frontend and -worker ends, after DAST and NFR-1, with the
+`e2e` stage (`gmshield_ci/e2e.py`): the three apps run together, and a real browser walks the chain a
+GM walks. It has no gate key: `ok` passes, anything else fails the run, so promotion is blocked.
+
+- **Images.** The run's own image, and for each other app `gmshield-ci/<service>:<sha>` of that repo's
+  latest develop run in `state/state.json`, whatever that run's result. When that image is gone (CI
+  images are pruned to 3 per service) the stage errors with "no develop image of <repo>; run its develop
+  pipeline". After a contract change that spans two repos, one manual `run <repo> develop` re-runs the
+  first repo against the second's new image. The three shas are in the stage's metrics and summary line.
+- **Containers**, on one throwaway `--internal` network labelled with the run: `postgres` and `redis` (the
+  staging services), `stand-in-qdrant` (Qdrant as pinned in `infra/compose.yaml`, no key, storage on
+  tmpfs), `stand-in-ollama` (`quality/e2e/stand_in_ollama.py` run with the worker image's Python:
+  `POST /api/embed` answers one deterministic 768-number vector per input, from hashed words, and a
+  malformed embed body gets 400; any other request is 404), then the backend (`stand-in-backend`), the worker (no alias) and the frontend
+  (`frontend`). Each app starts as DAST starts the app under test (`container_args(..., "staging")` with
+  its contract read at the image's commit: `GMSHIELD_MODE=test`, caps, hardening, tmpfs, throwaway
+  volumes and certificates). The worker's contract points Ollama at the production gateway, so the test
+  sets `GMSHIELD_OLLAMA_URL` to the stand-in. The backend must answer `/actuator/health`, the frontend
+  `/api/health`, and the worker's HEALTHCHECK must turn healthy (a container without one counts once it
+  has run 20 s without exiting), before the browser starts.
+- **The driver** (`quality/e2e/driver.py`) runs in Playwright's Python image inside the frontend
+  container's network namespace (`--network container:<frontend>`), so Chromium opens
+  `http://localhost:3000` and the `__Host-` Secure cookies work over plain HTTP, under the real
+  Content-Security-Policy. It reads every label from the frontend's own `src/messages/en.json` at the
+  tested commit. The steps, each with its own time limit, stop at the first failure:
+
+  | Step | Passes when |
+  |---|---|
+  | `sign_in` | the first sign-in through the Google stand-in, with the username step, reaches the questions screen |
+  | `upload` | a generated 2-page PDF of invented game content, sent through the guided upload, reaches review |
+  | `accept` | Accept makes it ready, and the indexing notice is gone |
+  | `ask` | a question about one invented fact in it gets a complete answer (not silent, not an error) listing a reference to it |
+  | `open_reference` | the reference opens the source view, its page picture loads (HTTP 200, an image) and the cited passage is marked |
+
+  A Content-Security-Policy violation the browser reports during a step fails that step; one reported
+  later (the browser's report arrives asynchronously) fails the stage.
+- **Driver image**: Playwright's Python image lacks the `playwright` package, so the stage first builds
+  `gmshield-ci/e2e-driver:<hash>` from `quality/e2e/Dockerfile` (the pinned image plus
+  `quality/e2e/requirements.txt`, by hash) when it is missing, within its own 900 s, and keeps it.
+- **Limit**: `[limits] e2e` (1200 s) starts after the driver image is there. It is checked between the
+  start-up phases (each start-up wait also keeps its own `[limits] startup`, 180 s) and bounds the
+  browser's run; past it, the stage errors with `timed out`. Every container, volume and network is
+  removed at the end, and the run's crash cleanup catches them by label.
+- **Files**, in the run folder under `e2e/`: `result.json` (each step's status, seconds and error; the
+  outcome, the reason and the three shas), `<step>-failed.png` for a failed step, `driver.log`, `e2e.log`
+  and the log of every container. No answer or passage text is written to them; a failure screenshot
+  shows only the test's invented PDF and the fake model's answer, never library text.
+
+By hand, against the latest develop image of all three repos: `python3 -m gmshield_ci e2e`. It waits
+for no run (it takes the poll lock, so a poll's crash cleanup cannot remove its containers: when a run
+is in progress it says so and exits 1), and exits 0 only when every step passes. Its files go to
+`~/gmshield-ci/artifacts/quality/e2e/<UTC yyyy-mm-dd-HHMMSS>/`, which housekeeping never removes.
+Memory: ci.slice holds about 4.4 GB for the worker's parsing child, the backend's JVM, Chromium and the
+services together; the PDF has 2 pages to keep the parsing peak low.
 
 ### Housekeeping (disk space)
 
