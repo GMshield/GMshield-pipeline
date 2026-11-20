@@ -1,0 +1,9 @@
+The SM-2 question set (Story 2.9) in this folder
+
+questions.json holds 50 questions about the System Reference Document 5.2.1, 25 in Portuguese and 25 in English,
+written for these checks. Each question carries short answer phrases quoted from the SRD 5.2.1 (at most 15 words)
+and the pages they appear on; `python3 -m gmshield_ci sm2` looks for them in the passages an answer cites.
+
+This work includes material from the System Reference Document 5.2.1 (“SRD 5.2.1”) by Wizards of the Coast LLC,
+available at https://www.dndbeyond.com/srd. The SRD 5.2.1 is licensed under the Creative Commons Attribution 4.0
+International License, available at https://creativecommons.org/licenses/by/4.0/legalcode.
