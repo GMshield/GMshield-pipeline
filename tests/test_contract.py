@@ -931,6 +931,7 @@ class FlowTest(unittest.TestCase):
         order = []
         run = types.SimpleNamespace(mode="full", old=None, sha=SHA, records=[], notes=[], id=RUN_ID, tree="t",
                                     repo=types.SimpleNamespace(name="GMshield-x"),
+                                    contract=types.SimpleNamespace(service="x"),
                                     s=types.SimpleNamespace(state_dir=Path(tempfile.mkdtemp())))
         self.addCleanup(shutil.rmtree, run.s.state_dir, ignore_errors=True)
         with mock.patch.object(pipeline, "_source_checks", lambda *a, **k: None), \

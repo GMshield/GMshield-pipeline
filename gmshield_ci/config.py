@@ -461,13 +461,16 @@ def volume_name(c: Contract, m: Mount, run_id: str = "") -> str:
 
 def container_args(c: Contract, s: Settings, role: str, *, name: str, image: str, network: str,
                    labels: Sequence[str] = (), env_file: Path | None = None, run_id: str = "",
-                   certs_dir: Path | None = None, create: bool = False) -> list[str]:
+                   certs_dir: Path | None = None, create: bool = False, alias: str | None = "app",
+                   extra_env: dict | None = None) -> list[str]:
     """The one place that turns a contract into `docker run` (or `docker create`) arguments. Pure.
 
     role "production": the live container on `network` (the first of its networks); `create` makes it
     `docker create` so further networks can be connected before `docker start`.
     role "staging": the throwaway copy on a run's internal network, inside the CI slice, with
-    GMSHIELD_MODE=test; `labels` are the run's labels.
+    GMSHIELD_MODE=test; `labels` are the run's labels; `alias` is its name on that network ("app" for the
+    copy DAST attacks, the test-mode hostname in the end-to-end test, None for none); `extra_env` overrides
+    the contract's variables there (the end-to-end test points a production address at its stand-in).
     Each mount is a Docker named volume (volume_name): `gmshield-<service>-<name>` in production, the
     run's throwaway volume in staging (`run_id`, created beforehand with the run's labels). `certs_dir`
     (the service's own certificates folder) is mounted read-only at CERTS_TARGET.
@@ -485,9 +488,10 @@ def container_args(c: Contract, s: Settings, role: str, *, name: str, image: str
             cmd += ["--env-file", str(env_file)]
     elif role == "staging":
         cmd = [*verb, "--name", name, *labels, "--cgroup-parent", s.ci_slice, *detach, "--network", network]
-        for k, v in {**c.env, **c.staging_env, MODE_VAR: "test"}.items():
+        for k, v in {**c.env, **c.staging_env, **(extra_env or {}), MODE_VAR: "test"}.items():
             cmd += ["-e", f"{k}={v}"]
-        cmd += ["--network-alias", "app"]
+        if alias:
+            cmd += ["--network-alias", alias]
     else:
         raise ValueError(f"unknown role {role!r}")
     if c.read_only:

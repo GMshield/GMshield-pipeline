@@ -520,15 +520,28 @@ def generated_pdf(pages: int, stamp: str) -> bytes:
     """A text-only PDF of `pages` pages of generated filler (no library text), unique per run (`stamp`)."""
     words = ("amber basalt cobalt delta ember fjord granite harbor indigo juniper kelp lantern meadow nickel "
              "orchard pebble quartz river saffron timber umber valley willow xenon yarrow zephyr").split()
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
-    kids = []
+    texts = []
     for n in range(1, pages + 1):
         lines = [f"SM-2 burst filler, run {stamp}, page {n} of {pages}."]
         seed = hashlib.sha256(f"{stamp}/{n}".encode()).digest()        # 32 bytes: one word choice each
         lines += [" ".join(words[seed[(row * 12 + col) % 32] % len(words)] for col in range(12)) + "."
                   for row in range(36)]
-        text = "".join(f"({line}) Tj T* " for line in lines)
-        stream = f"BT /F1 11 Tf 14 TL 56 780 Td {text}ET".encode()
+        texts.append(lines)
+    return text_pdf(texts)
+
+
+def _pdf_string(line: str) -> str:
+    """A PDF literal string's content: backslash and parentheses escaped (Latin-1 text only)."""
+    return line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def text_pdf(pages: list[list[str]]) -> bytes:
+    """A text-only A4 PDF, one list of lines per page, in Helvetica 11 (the lines must fit the page)."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for lines in pages:
+        text = "".join(f"({_pdf_string(line)}) Tj T* " for line in lines)
+        stream = f"BT /F1 11 Tf 14 TL 56 780 Td {text}ET".encode("latin-1")
         objs.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream))
         content = len(objs)
         objs.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents %d 0 R "

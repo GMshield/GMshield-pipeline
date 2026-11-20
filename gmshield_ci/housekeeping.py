@@ -111,13 +111,24 @@ class Image:
         return self.id if self.tag == "<none>" else f"{self.repo}:{self.tag}"
 
 
+def develop_image_refs(state: dict) -> set[str]:
+    """`gmshield-ci/<service>:<sha>` of each repo's latest develop run in state.json: the end-to-end test of the other
+    repos runs it (gmshield_ci/e2e.py), however long ago it was built."""
+    refs = set()
+    for repo, branches in state.items():
+        sha = ((branches or {}).get("develop") or {}).get("sha") if isinstance(branches, dict) else None
+        if sha:
+            refs.add(f"gmshield-ci/{re.sub(r'^gmshield-', '', repo.lower())}:{sha}")
+    return refs
+
+
 def images_to_remove(s: Settings, images: list[Image], protected_ids: set[str],
-                     now: datetime) -> list[tuple[str, str]]:
-    """(ref, reason) for every image tag housekeeping removes."""
+                     now: datetime, keep_refs: set[str] = frozenset()) -> list[tuple[str, str]]:
+    """(ref, reason) for every image tag housekeeping removes; `keep_refs` (develop_image_refs) are never removed."""
     out: list[tuple[str, str]] = []
     groups: dict[str, list[Image]] = {}
     for im in images:
-        if im.id in protected_ids:
+        if im.id in protected_ids or im.ref in keep_refs:
             continue
         if im.repo.startswith(f"{s.registry}/gmshield-") or im.repo.startswith("gmshield-ci/"):
             groups.setdefault(im.repo, []).append(im)
@@ -241,7 +252,7 @@ def run(s: Settings, reason: str = "manual", dry_run: bool = False) -> dict:
             shutil.rmtree(p, ignore_errors=True)
 
     # 2. Docker images (before the cache, so the cache their layers held becomes prunable)
-    victims = images_to_remove(s, list_images(), protected_image_ids(), now)
+    victims = images_to_remove(s, list_images(), protected_image_ids(), now, develop_image_refs(state))
     report["images_removed"] = [f"{ref} ({why})" for ref, why in victims]
     if not dry_run:
         failed = [ref for ref, _ in victims if sh(["docker", "rmi", ref], None, 300) != 0]
