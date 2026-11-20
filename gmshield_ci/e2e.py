@@ -57,7 +57,7 @@ FRONTEND_PORT = 3000
 OLLAMA_PORT = 11434
 QDRANT_PORT = 6333
 # Contract variables that name a production address; the test mode reads them when set, so they point at the stand-in.
-STAND_IN_ENV = {"GMSHIELD_OLLAMA_URL": f"http://stand-in-ollama:{OLLAMA_PORT}"}  # NOSONAR: test-mode stand-in on the run's internal network, which has no TLS
+STAND_IN_ENV = {"GMSHIELD_OLLAMA_URL": f"http://stand-in-ollama:{OLLAMA_PORT}"}  # NOSONAR(S5332) test-mode stand-in on the run's internal network, which has no TLS
 DEFAULT_LIMIT = 1200
 USERNAME = "e2e_gm"
 PDF_NAME = "e2e-wardens-of-the-fen.pdf"
