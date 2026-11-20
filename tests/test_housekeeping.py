@@ -104,6 +104,17 @@ class ImagesTest(unittest.TestCase):
         self.assertEqual(sorted(out), ["gmshield-ci/sample:x0", "gmshield-ci/sample:x1",
                                        "gmshield-ci/worker:w3", "gmshield-ci/worker:w4"])
 
+    def test_the_latest_develop_image_of_each_repo_stays_for_the_end_to_end_test(self):
+        state = {"GMshield-worker": {"develop": {"sha": "w0", "result": "failed"}, "main": {"sha": "m"}},
+                 "GMshield-backend": {"main": {"sha": "b"}}}
+        keep = hk.develop_image_refs(state)
+        self.assertEqual(keep, {"gmshield-ci/worker:w0"})
+        inactive = [_img("gmshield-ci/worker", "w0", 400), _img("gmshield-ci/worker", "w1", 401)]
+        out = dict(hk.images_to_remove(_settings(), inactive, set(), NOW, keep))
+        self.assertEqual(list(out), ["gmshield-ci/worker:w1"])
+        newer = [_img("gmshield-ci/worker", f"x{i}", i) for i in range(4)] + [_img("gmshield-ci/worker", "w0", 9)]
+        self.assertNotIn("gmshield-ci/worker:w0", dict(hk.images_to_remove(_settings(), newer, set(), NOW, keep)))
+
     def test_other_images_only_when_old_unused_and_unpinned(self):
         images = [_img("alpine", "latest", 12), _img("python", "3.10-slim", 400),
                   _img("gitleaks", "<none>", 500, "sha256:pinned"), _img("qdrant/qdrant", "v1", 420, "sha256:used")]

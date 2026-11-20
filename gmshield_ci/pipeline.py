@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import github, gitops, housekeeping, report, sonar, stages
+from . import e2e, github, gitops, housekeeping, report, sonar, stages
 from .config import RUNNER_DIR, Contract, ContractError, Repo, Settings, load_contract
 from .dockerops import Docker, capture, cleanup_label, prune_images, sh
 
@@ -152,7 +152,8 @@ def _passed(run: Run) -> bool:
 # ------------------------------------------------------------------ flows
 
 def develop_flow(run: Run) -> None:
-    """develop: unit tests + SAST + secrets + SCA/IaC, image build+scan, active DAST and NFR-1, then the gate."""
+    """develop: unit tests + SAST + secrets + SCA/IaC, image build+scan, active DAST and NFR-1, the end-to-end test
+    (full runs of the backend, frontend and worker), then the gate."""
     if run.mode == "light":
         run.log_opts = f"{run.sha}^!"
         _source_checks(run, with_tests=False)
@@ -166,6 +167,8 @@ def develop_flow(run: Run) -> None:
         stages.execute(run, "dast", "DAST (OWASP ZAP, active, staging)", "dast_develop", stages.dast_staging)
         if not any(r.key == "nfr1" for r in run.records):   # the staging session records it when it runs
             stages.execute(run, "nfr1", stages.NFR1_TITLE, "nfr1", stages.nfr1_not_run)
+        if run.contract.service in e2e.SERVICES:          # no gate key: ok passes, anything else fails the run
+            stages.execute(run, "e2e", e2e.TITLE, None, e2e.stage)
     run.result = "passed" if _passed(run) else "failed"
     if run.mode == "full" and run.result == "passed":
         promos = _read(run.s.state_dir / "promotions.json", {})
