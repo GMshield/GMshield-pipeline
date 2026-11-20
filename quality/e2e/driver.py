@@ -114,7 +114,11 @@ class Driver:
         page.get_by_label(m("username.terms"), exact=True).check(timeout=self.ms())
         page.get_by_role("button", name=m("username.submit"), exact=True).click(timeout=self.ms())
         page.wait_for_url(re.compile(r"/questions(?:[?#].*)?$"), timeout=self.ms())
-        page.get_by_label(m("conversation.composer.label"), exact=True).wait_for(timeout=self.ms())
+        # The backend has just started: its first answers can outlast the frontend's backend timeout, so this first
+        # page may render "service unavailable" with no composer. Reload until it appears, as a GM would.
+        composer = page.get_by_label(m("conversation.composer.label"), exact=True)
+        self.until(lambda: self.visible(composer), "the questions screen never showed its composer", every=2.0,
+                   reload_every=10.0)
 
     def upload(self) -> None:
         m, page = self.m, self.page
