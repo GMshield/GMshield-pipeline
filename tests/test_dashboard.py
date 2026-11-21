@@ -172,6 +172,17 @@ class DashboardTest(unittest.TestCase):
         colored = dashboard.render(dashboard.collect(self.s, timer=False), 170, 48, NOW, True)
         self.assertEqual(len(colored), 48)
 
+    def test_develop_table_fits_beside_main_on_the_server_console(self):
+        # roberto-server's console is 170 columns; develop has 12 stages, so it needs more than half.
+        repos = [r.name for r in self.s.repos]
+        _run(self.home, "GMshield-backend", "develop", "20261110-100000-aaaa", "passed", "2026-11-10T10:00:00+00:00")
+        lines = dashboard.render(dashboard.collect(self.s, timer=False), 170, 48, NOW, False, "srv", repos)
+        head = next(l for l in lines if l.startswith(" Repo") and "E2E" in l)
+        left = head.split(" │ ")[0]
+        self.assertIn("When", left)
+        row = next(l for l in lines if l.startswith(" backend") and "PASSED" in l)
+        self.assertNotIn("…", row.split(" │ ")[0])
+
     def test_stopped_timer_is_shown(self):
         snap = dashboard.Snapshot(timer="inactive")
         self.assertIn("Poller timer INACTIVE", self.frame(snap))

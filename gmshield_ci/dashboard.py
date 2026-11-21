@@ -39,6 +39,7 @@ STAGES = {
              ("publish", "Publ", "registry"), ("deploy", "Depl", "deploy"), ("dast_prod", "DAST", "ZAP passive"),
              ("release", "Rel", "release")],
 }
+RELEASE_LINE_WIDTH = 72  # " Latest release: r2026.11.20-2232-077ffbd3 (pipeline, 23h 04m ago)"
 CELL = {"passed": ("ok", "green"), "failed": ("FAIL", "alert"), "skipped": ("skip", "dim")}
 NOT_RUN = ("·", "dim")
 
@@ -253,10 +254,21 @@ def paint(line: Line, color: bool) -> str:
     return "".join(f"\033[{COLORS[s]}m{t}\033[0m" if s and t.strip() else t for t, s in line)
 
 
-def _section(branch: str, snap: Snapshot, repos: list[str], width: int, height: int, now: datetime) -> list[Line]:
+def _layout(branch: str, repos: list[str]) -> tuple[list, list[int], int]:
     stages = STAGES.get(branch) or STAGES["develop"]
     cols = [max(4, len(label)) + 1 for _, label, _ in stages]
     rw = max([len("Repo")] + [len(_short(r)) for r in repos]) + 2
+    return stages, cols, rw
+
+
+def table_width(branch: str, repos: list[str]) -> int:
+    """Columns the stage table needs: repo, result, one column per stage, and a full date in When."""
+    _, cols, rw = _layout(branch, repos)
+    return 1 + rw + 9 + sum(cols) + len("Nov 20 14:56") + 2
+
+
+def _section(branch: str, snap: Snapshot, repos: list[str], width: int, height: int, now: datetime) -> list[Line]:
+    stages, cols, rw = _layout(branch, repos)
     lines: list[Line] = []
 
     keys = [(r, branch) for r in repos]
@@ -364,7 +376,10 @@ def render(snap: Snapshot, cols: int, rows: int, now: datetime, color: bool = Fa
     side_by_side = len(branches) == 2 and cols >= 150
     body: list[Line] = []
     if side_by_side:
-        w = (cols - 3) // 2
+        # The right section (main) gets only the width its table and release line need, at most half;
+        # the left section (develop, with more stages) gets the rest.
+        right_w = min((cols - 3) // 2, max(table_width(branches[1], repos), RELEASE_LINE_WIDTH))
+        w = cols - 3 - right_w
         left = _section(branches[0], snap, repos, w, body_h, now)
         right = _section(branches[1], snap, repos, cols - 3 - w, body_h, now)
         body = [l + [(" │ ", "dim")] + r for l, r in zip(left, right)]
