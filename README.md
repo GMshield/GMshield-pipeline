@@ -24,6 +24,9 @@ push to develop ──► Resolve flow
                     ► End-to-end             (backend, frontend and worker develop runs only: the three
                                               apps together in test mode with the fake model, driven by
                                               a real browser; see "End-to-end test" below)
+                    ► Leak test SM-1         (same runs, on its own stack: two campaigns of one system,
+                                              40 questions each, no passage outside a campaign's scope
+                                              found, fetched or cited; see "SM-1 leak test" below)
                     ► Quality gate ──pass──► code is promotable (recorded by its git tree)
                                              + GitHub status gmshield-ci/develop = success
 
@@ -204,6 +207,7 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 | Past housekeeping runs | `cat ~/gmshield-ci/state/housekeeping.jsonl` |
 | SM-2: sourced answers on the SRD (below) | `python3 -m gmshield_ci sm2 --session-file ~/.config/gmshield/sm2-session` |
 | End-to-end test of the latest develop images (below) | `python3 -m gmshield_ci e2e` |
+| SM-1 leak test of the latest develop images (below) | `python3 -m gmshield_ci leak` |
 
 ### SM-2: sourced answers on the SRD (Story 2.9)
 
@@ -314,6 +318,54 @@ is in progress it says so and exits 1), and exits 0 only when every step passes.
 `~/gmshield-ci/artifacts/quality/e2e/<UTC yyyy-mm-dd-HHMMSS>/`, which housekeeping never removes.
 Memory: ci.slice holds about 4.4 GB for the worker's parsing child, the backend's JVM, Chromium and the
 services together; the PDF has 2 pages to keep the parsing peak low.
+
+### SM-1 leak test with the fake model (Story 3.13, part A)
+
+Every full develop run of GMshield-backend, -frontend and -worker ends, after `e2e`, with the `leak`
+stage (`gmshield_ci/leak.py`): no campaign finds, fetches or cites a passage outside its scope (SM-1,
+FR-23). It has no gate key, like `e2e`, and its own column (`Leak`) on the dashboard.
+
+- **Stack.** Its own, started by the same code as `e2e` (`e2e.with_stack`): the same images, stand-ins,
+  internal network, labels, limits on start-up and cleanup, under the names `gmshield-ci-<run>-leak-*`.
+  No browser: an `e2e` browser failure never hides this verdict.
+- **The runner** (`quality/sm1/runner.py`, standard library only) runs with the worker image's Python
+  (`python -I`, read-only mount, read-only root, no capability) on the test network. It calls
+  `http://stand-in-backend:8080` with the test-mode frontend credential, signs in through the Google
+  stand-in as its own new account (`stand-in.sm1.leak@example.test`) and builds the library through the
+  public API: system "Vale de Ferro" with its rulebook `R`; its campaigns "Casa", with house rules `HA`
+  (each contradicts a rule of `R` and carries a marker word), and "Livro", with by-the-book session notes
+  `NB`; a second system "Mar de Cinzas" with its rulebook `X`. The four texts are invented Portuguese
+  game content (`quality/sm1/library/`, see `quality/sm1/ATTRIBUTION.txt`), turned into PDFs by
+  `sm2.text_pdf`, uploaded, accepted and indexed. Scopes stay at their defaults: Casa may use `R` + `HA`,
+  Livro `R` + `NB`. It asks the 40 questions of `quality/sm1/questions.json` (20 pt-BR, 20 en; 24 `house`,
+  8 `notes`, 8 `neutral`; part B, the real-model run, asks the same set) in each campaign, one at a time,
+  each in a new conversation, then the control. Its record, `runner.json`, holds ids, codes, scope
+  versions and timings only.
+- **The checks.** The stage reads each material's passage ids from Postgres (by the version id its upload
+  returned), maps each turn's job to its conversation's campaign (`turn.job_id` →
+  `conversation.campaign_id`), and reads the ids each job found and fetched from the worker's
+  `retrieval.search_done` log lines. Any failed check fails the run:
+
+  | Check | Passes when |
+  |---|---|
+  | found and fetched | every id in a campaign's jobs' `retrieval.search_done` lines is in the campaign's allowed set |
+  | cited | every `citation` event's passage id and every `done` reference's passage ids are in it |
+  | clean ends | every turn ends in `done`, not stopped; any `error` fails, and `scope.passage_refused` counts as a found leak |
+  | not empty | in each campaign every allowed material is cited at least once, and every `house` question asked in Casa cites `HA` |
+  | control | with Livro's other tier on, one `house` question finds `HA` ids (then the tier goes off again); else "control failed: the check cannot see a leak" |
+
+  A failure names the campaign, the question and each foreign id with its material, for example
+  `leak found: Livro q07 HA:<id>`; a pass reads `80/80 clean, control ok (backend …, frontend …, worker …)`.
+- **Limit**: `[limits] leak` (1800 s) for the whole test: start-up, the library's ingestion, the 80
+  questions and the control.
+- **Files**, in the run folder under `leak/`: `result.json` (the verdict, each check's failures, per
+  campaign and per turn: ids, counts, codes, timings; the three shas), `summary.md`, `runner.json`,
+  `runner.log`, `leak.log` and the log of every container. No answer or passage text is written to them.
+
+By hand, against the latest develop image of all three repos: `python3 -m gmshield_ci leak`. Like `e2e`
+it takes the poll lock (when a run is in progress it says so and exits 1), removes everything it made,
+and exits 0 only when every check passes. Its files go to
+`~/gmshield-ci/artifacts/quality/leak/<UTC yyyy-mm-dd-HHMMSS>/`, which housekeeping never removes.
 
 ### Housekeeping (disk space)
 

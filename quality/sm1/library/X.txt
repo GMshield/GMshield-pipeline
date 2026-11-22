@@ -1,0 +1,15 @@
+Mar de Cinzas - Livro de Regras
+
+Iniciativa. Cada tripulante rola 2d8 e soma o seu Reflexo; o capitão
+decide os empates.
+
+Golpe crítico. Um 8 duplo nos 2d8 de ataque derruba o alvo no convés.
+
+Tempestade de cinzas. Durante uma tempestade de cinzas, cada tripulante
+no convés perde 1 ponto de fôlego por hora.
+
+Poção de sal. Beber uma poção de sal cura 1d8 pontos de vida e remove a
+cegueira das cinzas.
+
+Navegação. Um navio de cinzas percorre 60 milhas por dia com vento a
+favor.

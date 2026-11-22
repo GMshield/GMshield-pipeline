@@ -30,6 +30,7 @@ build = 1800
 unit_tests = 1800
 integration_tests = 1800       # the [test].target container, beside its throwaway services
 e2e = 1200                     # the whole end-to-end test: start-up of the three apps and the five browser steps
+leak = 1800                    # the whole SM-1 leak test: start-up, the library's ingestion, 80 questions and the control
 gitleaks = 600
 semgrep = 1200
 trivy = 1200

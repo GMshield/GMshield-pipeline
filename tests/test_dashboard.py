@@ -173,15 +173,36 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(len(colored), 48)
 
     def test_develop_table_fits_beside_main_on_the_server_console(self):
-        # roberto-server's console is 170 columns; develop has 12 stages, so it needs more than half.
-        repos = [r.name for r in self.s.repos]
-        _run(self.home, "GMshield-backend", "develop", "20261110-100000-aaaa", "passed", "2026-11-10T10:00:00+00:00")
+        # roberto-server's console is 170 columns; develop has 13 stages (E2E, then Leak), so it needs more than
+        # half, and main gives up its spare room. The server's four repos, as its dashboard lists them.
+        repos = ["GMshield-backend", "GMshield-frontend", "GMshield-worker", "GMshield-pipeline"]
+        self.assertEqual([k for k, _, _ in dashboard.STAGES["develop"]][-2:], ["e2e", "leak"])
+        _run(self.home, "GMshield-backend", "develop", "20261109-100000-aaaa", "passed", "2026-11-09T10:00:00+00:00")
+        _run(self.home, "GMshield-backend", "main", "20261109-100000-bbbb", "passed", "2026-11-09T10:00:00+00:00",
+             release="r2026.11.10-1000-0a827d61")
         lines = dashboard.render(dashboard.collect(self.s, timer=False), 170, 48, NOW, False, "srv", repos)
-        head = next(l for l in lines if l.startswith(" Repo") and "E2E" in l)
-        left = head.split(" │ ")[0]
-        self.assertIn("When", left)
+        self.assertTrue(all(len(l) <= 170 for l in lines))
+        head = next(l for l in lines if l.startswith(" Repo") and "Leak" in l)
+        left, right = head.split(" │ ")[:2]
+        self.assertIn("E2E  Leak When", left)
+        self.assertIn("When", right)
         row = next(l for l in lines if l.startswith(" backend") and "PASSED" in l)
-        self.assertNotIn("…", row.split(" │ ")[0])
+        left, right = row.split(" │ ")[:2]
+        self.assertNotIn("…", left)
+        self.assertNotIn("…", right)
+        self.assertRegex(left.rstrip(), r"[A-Z][a-z]{2} \d\d \d\d:\d\d$")       # the widest When: a full date
+        self.assertRegex(right.rstrip(), r"[A-Z][a-z]{2} \d\d \d\d:\d\d$")
+        release = next(l for l in lines if "Latest release:" in l)
+        self.assertNotIn("…", release)
+        # a develop run of the backend in progress: its row keeps room for the running mark after the full date
+        _run(self.home, "GMshield-backend", "develop", "20261110-115800-dddd", "", "", finished=False)
+        with open(self.home / "state" / "poll.lock", "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            snap = dashboard.collect(self.s, timer=False)
+        self.assertEqual((snap.running.repo, snap.running.branch), ("GMshield-backend", "develop"))
+        lines = dashboard.render(snap, 170, 48, NOW, False, "srv", repos)
+        row = next(l for l in lines if l.startswith(" backend") and "PASSED" in l)
+        self.assertTrue(row.split(" │ ")[0].rstrip().endswith("▶"), row)
 
     def test_stopped_timer_is_shown(self):
         snap = dashboard.Snapshot(timer="inactive")
