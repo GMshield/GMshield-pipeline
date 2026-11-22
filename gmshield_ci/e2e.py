@@ -214,8 +214,10 @@ def ollama_args(sess: Session, worker: App) -> dict:
     return {"name": f"{sess.prefix}-stand-in-ollama", "image": worker.image,
             "args": ["-I", "/e2e/stand_in_ollama.py", str(OLLAMA_PORT)], "entrypoint": "python",
             "mounts": [(QUALITY, "/e2e", "ro")],
+            # --no-healthcheck: the worker image's HEALTHCHECK can never pass here, and roberto-server's
+            # ai-healthcheck timer restarts every container marked unhealthy
             "extra": ["--network-alias", "stand-in-ollama", "--read-only", "--cap-drop", "ALL",
-                      "--security-opt", "no-new-privileges"]}
+                      "--security-opt", "no-new-privileges", "--no-healthcheck"]}
 
 
 DRIVER_BUILD = ("Dockerfile", "requirements.txt")

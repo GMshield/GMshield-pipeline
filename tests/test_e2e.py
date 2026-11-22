@@ -213,6 +213,7 @@ class ArgsTest(Base):
         self.assertEqual((o["image"], o["entrypoint"]), (apps["worker"].image, "python"))
         self.assertEqual(o["args"][:2], ["-I", "/e2e/stand_in_ollama.py"])
         self.assertIn("stand-in-ollama", o["extra"])
+        self.assertIn("--no-healthcheck", o["extra"])    # the worker image's check fails here; the server restarts unhealthy ones
         d = e2e.driver_args(sess, "front", self.tmp, self.tmp / "en.json")
         self.assertEqual((d["image"], d["network"]), (e2e.driver_image(self.s), "container:front"))
         self.assertRegex(d["image"], r"^gmshield-ci/e2e-driver:[0-9a-f]{12}$")
