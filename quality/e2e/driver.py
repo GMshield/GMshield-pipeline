@@ -114,6 +114,9 @@ class Driver:
         page.get_by_label(m("username.terms"), exact=True).check(timeout=self.ms())
         page.get_by_role("button", name=m("username.submit"), exact=True).click(timeout=self.ms())
         page.wait_for_url(re.compile(r"/questions(?:[?#].*)?$"), timeout=self.ms())
+        # From frontend Story 3.10, /questions is the list of Consultas conversations; the composer is on a new
+        # conversation, /questions/new, where the first question makes the conversation.
+        self.go("/questions/new")
         # The backend has just started: its first answers can outlast the frontend's backend timeout, so this first
         # page may render "service unavailable" with no composer. Reload until it appears, as a GM would.
         composer = page.get_by_label(m("conversation.composer.label"), exact=True)
@@ -172,7 +175,8 @@ class Driver:
                 raise StepFailed(f"the accept was refused: {alert.first.inner_text().strip()[:200]}")
             return not self.visible(accept) and self.visible(ready)
         self.until(accepted, "the material was not ready after Accept", every=2.0, reload_every=30.0)
-        self.go("/questions")
+        # A new conversation (frontend Story 3.10): its screen shows the indexing notice and the composer `ask` uses.
+        self.go("/questions/new")
         pending = page.get_by_text(re.compile("^" + re.escape(m.prefix("notice.indexing"))))
         # The final failure only: the retrying line ("...; trying again in a few minutes.") is not one.
         failed = page.get_by_text(m.pattern("notice.indexingFailed")).or_(
