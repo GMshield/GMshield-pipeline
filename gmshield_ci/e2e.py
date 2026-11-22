@@ -23,6 +23,9 @@ state.json, whatever its result (after a contract change spanning two repos, one
 against the second's new image). `python3 -m gmshield_ci e2e` runs the same test against the latest develop image of
 all three, with its files in artifacts/quality/e2e/<UTC yyyy-mm-dd-HHMMSS>/.
 
+The stack's start-up and removal (`with_stack`, `start_stack`) are shared with the SM-1 leak test (leak.py), which runs
+its own stack under its own names (Session.prefix "leak": gmshield-ci-<run>-leak-*).
+
 Kept: result.json (each step's status, seconds and error, the three shas), the failed step's screenshot, the driver's
 log, the stage's log and the logs of every container. No answer or passage text is written to them; a failure screenshot
 shows only the test's invented PDF and the fake model's answer, never library text.
@@ -119,6 +122,7 @@ class Session:
     log: Callable[[str], None] = print
     deadline: float = 0.0
     files: list[str] = field(default_factory=list)
+    prefix: str = "e2e"                # the stage's name in its containers, network, certificates and log
 
     def left(self) -> int:
         """Whole seconds left before the stage's limit; TimedOut when none are."""
@@ -184,7 +188,11 @@ def select_apps(sess: Session, own: App | None) -> list[App]:
 # ------------------------------------------------------------------ containers
 
 def cname(sess: Session, name: str) -> str:
-    return f"gmshield-ci-{sess.id}-e2e-{name}"
+    return f"gmshield-ci-{sess.id}-{sess.prefix}-{name}"
+
+
+def network_name(sess: Session) -> str:
+    return f"gmshield-ci-{sess.id}-{sess.prefix}"
 
 
 def app_args(sess: Session, app: App, network: str, certs: Path | None) -> list[str]:
@@ -197,13 +205,13 @@ def app_args(sess: Session, app: App, network: str, certs: Path | None) -> list[
 
 
 def qdrant_args(sess: Session) -> dict:
-    return {"name": "e2e-stand-in-qdrant", "image": sess.s.images["qdrant"], "args": [],
+    return {"name": f"{sess.prefix}-stand-in-qdrant", "image": sess.s.images["qdrant"], "args": [],
             "env": {"QDRANT__TELEMETRY_DISABLED": "true"},
             "extra": ["--network-alias", "stand-in-qdrant", "--tmpfs", "/qdrant/storage", "--tmpfs", "/qdrant/snapshots"]}
 
 
 def ollama_args(sess: Session, worker: App) -> dict:
-    return {"name": "e2e-stand-in-ollama", "image": worker.image,
+    return {"name": f"{sess.prefix}-stand-in-ollama", "image": worker.image,
             "args": ["-I", "/e2e/stand_in_ollama.py", str(OLLAMA_PORT)], "entrypoint": "python",
             "mounts": [(QUALITY, "/e2e", "ro")],
             "extra": ["--network-alias", "stand-in-ollama", "--read-only", "--cap-drop", "ALL",
@@ -253,7 +261,7 @@ def _start(sess: Session, spec: dict, network: str | None, log: Path) -> str:
                          env=spec.get("env"), user=None, detach=True, entrypoint=spec.get("entrypoint"),
                          mounts=spec.get("mounts", []), extra=spec.get("extra", []))
     if rc != 0:
-        raise E2EError(f"{spec['name'].removeprefix('e2e-')} failed to start")
+        raise E2EError(f"{spec['name'].removeprefix(sess.prefix + '-')} failed to start")
     return f"gmshield-ci-{sess.id}-{spec['name']}"
 
 
@@ -261,7 +269,7 @@ def _reachable(sess: Session, network: str, curl: str, log: Path) -> bool:
     """Retries one curl (its arguments, without `curl`) from inside the network until it succeeds."""
     limit = min(sess.s.limit("startup", 180), sess.left())
     tries = max(1, limit // 3)
-    rc = sess.docker.run("e2e-probe", sess.s.images["zap"],
+    rc = sess.docker.run(f"{sess.prefix}-probe", sess.s.images["zap"],
                          ["sh", "-c", f"for i in $(seq 1 {tries}); do curl -fsS -o /dev/null {curl} && exit 0; "
                                       f"sleep 3; done; exit 1"],
                          log=log, timeout=limit + 60, network=network, user=None, entrypoint="")
@@ -314,25 +322,34 @@ def _empty_steps() -> list[dict]:
     return [{"step": s, "status": "not_run", "seconds": 0.0, "error": None} for s in STEPS]
 
 
-# ------------------------------------------------------------------ the test
+# ------------------------------------------------------------------ the stack (shared with leak.py)
 
-def execute(sess: Session, own: App | None):
-    """Runs the test; returns (outcome, metrics, files, detail) as a stage does. Everything it starts is removed."""
+def with_stack(sess: Session, own: App | None, body: Callable, check: Callable | None = None):
+    """Selects the three apps (`own` and the others' latest develop images), runs `check(by_service)` (an E2EError
+    stops before anything starts), starts the stack (`start_stack`), then `body(by_service, network, log,
+    containers)`, which returns (outcome, reason, result). Whatever happens, every container's log is kept in
+    sess.dir and every container, volume and the network are removed. Returns (outcome, reason, result, apps);
+    an E2EError anywhere is ("error", its message, None, apps)."""
     sess.dir.mkdir(parents=True, exist_ok=True)
     sess.work.mkdir(parents=True, exist_ok=True)
-    log = sess.dir / "e2e.log"
+    log = sess.dir / f"{sess.prefix}.log"
     log.touch()
-    sess.keep("e2e.log")
-    net = f"gmshield-ci-{sess.id}-e2e"
+    sess.keep(log.name)
+    net = network_name(sess)
     containers: dict[str, str] = {}             # log name -> container
     volumes: list[str] = []
     apps: list[App] = []
-    result: dict | None = None
+    result = None
     outcome, reason = "error", ""
     try:
         try:
             apps = select_apps(sess, own)
-            outcome, reason, result = _session(sess, apps, net, log, containers, volumes)
+            by = {a.service: a for a in apps}
+            sess.left()
+            if check is not None:
+                check(by)
+            start_stack(sess, by, net, log, containers, volumes)
+            outcome, reason, result = body(by, net, log, containers)
         except E2EError as e:
             outcome, reason = "error", str(e)
     finally:
@@ -346,36 +363,20 @@ def execute(sess: Session, own: App | None):
         if volumes:
             sh(["docker", "volume", "rm", "-f", *volumes], None, 120)
         sh(["docker", "network", "rm", net], None, 60)
-    shas = {a.service: a.sha for a in apps}
-    final = {**(result or {"steps": _empty_steps()}), "outcome": outcome, "reason": reason, "shas": shas,
-             "images": {a.service: a.image for a in apps}}
-    (sess.dir / "result.json").write_text(json.dumps(final, indent=2))
-    sess.keep("result.json")
-    for f in sorted(sess.dir.glob("*-failed.png")):
-        sess.keep(f.name)
-    passed = sum(1 for s in final["steps"] if s.get("status") == "passed")
-    metrics = {"shas": shas, "steps": final["steps"], "csp_violations": final.get("csp_violations", 0)}
-    short = ", ".join(f"{k} {v[:8]}" for k, v in shas.items())
-    if outcome == "ok":
-        return "ok", metrics, list(sess.files), f"{passed}/{len(STEPS)} steps passed ({short})"
-    metrics["error"] = reason
-    return "error", metrics, list(sess.files), f"{reason}{f' ({short})' if short else ''}"
+    return outcome, reason, result, apps
 
 
-def _session(sess: Session, apps: list[App], net: str, log: Path, containers: dict, volumes: list):
-    by = {a.service: a for a in apps}
-    sess.left()
-    frontend_src = by["frontend"].src / MESSAGES
-    if not frontend_src.is_file():
-        raise E2EError(f"the frontend has no {MESSAGES} at {by['frontend'].sha[:8]} (the driver's labels)")
+def start_stack(sess: Session, by: dict[str, App], net: str, log: Path, containers: dict, volumes: list) -> None:
+    """The internal network, the apps' throwaway volumes, Postgres and Redis, the stand-in Qdrant and Ollama, then
+    the backend, the worker and the frontend, each healthy. E2EError names what did not start."""
     if not stages._network(sess, net, log):
-        raise E2EError("cannot create the end-to-end network")
-    for app in apps:
+        raise E2EError(f"cannot create the {sess.prefix} network")
+    for app in by.values():
         made, err = stages._staging_volumes(sess, log, app.contract)
         volumes += made
         if err:
             raise E2EError(f"{app.service}: {err}")
-    names, err = stages.start_services(sess, net, ["postgres", "redis"], "e2e", sess.dir, log)
+    names, err = stages.start_services(sess, net, ["postgres", "redis"], sess.prefix, sess.dir, log)
     containers.update(zip(["postgres", "redis"], names))
     if err:
         raise E2EError(f"service {err}")
@@ -393,7 +394,8 @@ def _session(sess: Session, apps: list[App], net: str, log: Path, containers: di
         c = app.contract
         certs = None
         if c.certs:
-            certs = stages.staging_certs(sess, [x for x in (ALIASES[svc], svc) if x], name=f"e2e-{svc}", log=log)
+            certs = stages.staging_certs(sess, [x for x in (ALIASES[svc], svc) if x], name=f"{sess.prefix}-{svc}",
+                                         log=log)
             if certs is None:
                 raise E2EError(f"could not create the throwaway certificates of the {svc}")
         containers[svc] = cname(sess, svc)
@@ -409,6 +411,37 @@ def _session(sess: Session, apps: list[App], net: str, log: Path, containers: di
     sess.left()
     if not _healthy(containers["worker"], min(sess.s.limit("startup", 180), sess.left())):
         raise E2EError(f"the worker was not healthy within {sess.s.limit('startup', 180)}s")
+
+
+# ------------------------------------------------------------------ the test
+
+def execute(sess: Session, own: App | None):
+    """Runs the test; returns (outcome, metrics, files, detail) as a stage does. Everything it starts is removed."""
+    outcome, reason, result, apps = with_stack(sess, own, lambda by, net, log, containers: _drive(sess, by, containers),
+                                               check=_messages)
+    shas = {a.service: a.sha for a in apps}
+    final = {**(result or {"steps": _empty_steps()}), "outcome": outcome, "reason": reason, "shas": shas,
+             "images": {a.service: a.image for a in apps}}
+    (sess.dir / "result.json").write_text(json.dumps(final, indent=2))
+    sess.keep("result.json")
+    for f in sorted(sess.dir.glob("*-failed.png")):
+        sess.keep(f.name)
+    passed = sum(1 for s in final["steps"] if s.get("status") == "passed")
+    metrics = {"shas": shas, "steps": final["steps"], "csp_violations": final.get("csp_violations", 0)}
+    short = ", ".join(f"{k} {v[:8]}" for k, v in shas.items())
+    if outcome == "ok":
+        return "ok", metrics, list(sess.files), f"{passed}/{len(STEPS)} steps passed ({short})"
+    metrics["error"] = reason
+    return "error", metrics, list(sess.files), f"{reason}{f' ({short})' if short else ''}"
+
+
+def _messages(by: dict[str, App]) -> None:
+    """The frontend's en.json at its commit (the driver's labels) must be there before anything starts."""
+    if not (by["frontend"].src / MESSAGES).is_file():
+        raise E2EError(f"the frontend has no {MESSAGES} at {by['frontend'].sha[:8]} (the driver's labels)")
+
+
+def _drive(sess: Session, by: dict[str, App], containers: dict):
     inputs = sess.work / "in"
     inputs.mkdir(parents=True, exist_ok=True)
     (inputs / PDF_NAME).write_bytes(pdf_bytes())
@@ -419,7 +452,7 @@ def _session(sess: Session, apps: list[App], net: str, log: Path, containers: di
     inputs.chmod(0o755)
     for f in inputs.iterdir():
         f.chmod(0o644)
-    spec = driver_args(sess, containers["frontend"], inputs, frontend_src)
+    spec = driver_args(sess, containers["frontend"], inputs, by["frontend"].src / MESSAGES)
     sess.log(f"e2e: driver started (budget {budget}s)")
     rc = sess.docker.run(spec["name"], spec["image"], spec["args"], log=sess.dir / "driver.log",
                          timeout=sess.left(), network=spec["network"], env=spec["env"], mounts=spec["mounts"])

@@ -1,0 +1,22 @@
+Campanha Casa - Regras da casa
+
+Estas regras valem só na campanha Casa e substituem as do livro.
+
+Iniciativa (regra corvoalto). Ninguém rola iniciativa: os personagens
+agem em ordem de Agilidade, do maior para o menor, e o mestre age por
+último.
+
+Golpe crítico (regra pedrafunda). Um 9 ou um 10 natural no d10 de
+ataque é um golpe crítico, e o dano do ataque é triplicado.
+
+Pontos de vida a zero (regra ventolargo). O personagem só morre depois
+de cinco falhas no teste de fôlego.
+
+Descanso curto (regra luzerna). Uma hora de descanso devolve todos os
+pontos de vigor do personagem.
+
+Poção de seiva (regra brasaviva). Beber uma poção de seiva cura 4d6
+pontos de vida.
+
+Magia (regra cinzarrubra). Lançar um feitiço custa o dobro do seu
+círculo em pontos de essência.

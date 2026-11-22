@@ -1,0 +1,15 @@
+The SM-1 leak test's library and questions (Story 3.13) in this folder
+
+library/R.txt, HA.txt, NB.txt and X.txt are invented game content, written for this test in Portuguese. They quote no
+published game, book or website, and every name, rule and number in them is made up:
+
+- R.txt: the rulebook of the invented system "Vale de Ferro", attached to that system;
+- HA.txt: campaign "Casa"'s house rules. Each one contradicts a rule of R.txt and carries its own marker word
+  (corvoalto, pedrafunda, ventolargo, luzerna, brasaviva, cinzarrubra), so an answer that repeats a house rule
+  can be told by that word;
+- NB.txt: campaign "Livro"'s session notes, by the book: they change no rule;
+- X.txt: the rulebook of a second invented system, "Mar de Cinzas", attached to that system.
+
+The pipeline turns each file into a text-only PDF (gmshield_ci/sm2.text_pdf): a line holding only "---" starts a new
+page. questions.json holds the 40 questions asked in both campaigns; the leak gate (gmshield_ci/leak.py, part A)
+and the real-model run (part B) share them.

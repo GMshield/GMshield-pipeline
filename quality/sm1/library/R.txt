@@ -1,0 +1,39 @@
+Vale de Ferro - Livro de Regras
+
+Capítulo 1: Testes e combate
+
+Iniciativa. No início de um combate, cada personagem rola um d10 e soma
+a sua Agilidade. Quem tiver o maior total age primeiro; um empate se
+resolve com uma nova rolagem entre os empatados.
+
+Golpe crítico. Um 10 natural no d10 de ataque é um golpe crítico: o dano
+do ataque é dobrado.
+
+Pontos de vida a zero. Um personagem com 0 pontos de vida cai e faz um
+teste de fôlego a cada rodada. Com três falhas ele morre; com três
+sucessos ele fica estável.
+
+Descanso curto. Uma hora de descanso devolve metade dos pontos de vigor
+do personagem, arredondada para baixo.
+
+Poção de seiva. Beber uma poção de seiva cura 2d6 pontos de vida.
+
+Magia. Lançar um feitiço custa pontos de essência iguais ao círculo do
+feitiço: um feitiço do terceiro círculo custa três pontos.
+---
+Capítulo 2: Viagem e equipamento
+
+Carga. Um personagem carrega até 10 itens mais o dobro da sua Força.
+Quem passa desse limite anda pela metade do caminho.
+
+Marcha forçada. Marchar mais de 8 horas num mesmo dia causa um nível de
+fadiga, que só um descanso longo remove.
+
+Montarias. Um cavalo de carga percorre 40 km por dia em estrada.
+
+Moedas. Uma coroa de ferro vale 10 tostões de cobre.
+
+Armadura pesada. Quem veste armadura pesada sofre -2 nos testes de
+furtividade.
+
+Experiência. Subir de nível exige 1000 pontos de experiência.
