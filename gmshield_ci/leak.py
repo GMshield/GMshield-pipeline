@@ -120,12 +120,14 @@ def runner_config(budget: int) -> dict:
 
 def runner_args(sess: e2e.Session, worker: e2e.App, inputs: Path) -> dict:
     """The runner as the stand-in Ollama runs: the worker image's Python, isolated, from a read-only mount, with a
-    read-only root and no capability; it writes only its record, to the stage's folder."""
+    read-only root and no capability; it writes only its record, to the stage's folder. No health check: the worker
+    image's HEALTHCHECK can never pass here, and roberto-server's ai-healthcheck timer restarts every unhealthy
+    container, which would start the runner again under the same account (2026-11-22, the first server run)."""
     return {"name": f"{sess.prefix}-runner", "image": worker.image, "entrypoint": "python",
             "args": ["-I", "/sm1/runner.py", "/in/config.json"],
             "env": {"PYTHONDONTWRITEBYTECODE": "1"},
             "mounts": [(inputs, "/in", "ro"), (QUALITY, "/sm1", "ro"), (sess.dir, "/out", "rw")],
-            "extra": ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]}
+            "extra": ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--no-healthcheck"]}
 
 
 # ------------------------------------------------------------------ what the apps recorded

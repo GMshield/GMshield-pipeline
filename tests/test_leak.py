@@ -530,7 +530,7 @@ class StageTest(Base):
         self.assertIn((leak.QUALITY, "/sm1", "ro"), kw["mounts"])
         self.assertIn((sess.dir, "/out", "rw"), kw["mounts"])
         self.assertTrue(all(mode == "ro" for _, c, mode in kw["mounts"] if c != "/out"))
-        for flag in ("--read-only", "no-new-privileges"):
+        for flag in ("--read-only", "no-new-privileges", "--no-healthcheck"):
             self.assertIn(flag, kw["extra"])
         self.assertEqual(kw["extra"][kw["extra"].index("--cap-drop") + 1], "ALL")
         cfg = docker.config
