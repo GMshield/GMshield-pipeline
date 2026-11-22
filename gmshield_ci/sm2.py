@@ -535,9 +535,13 @@ def _pdf_string(line: str) -> str:
     return line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def text_pdf(pages: list[list[str]]) -> bytes:
-    """A text-only A4 PDF, one list of lines per page, in Helvetica 11 (the lines must fit the page)."""
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+def text_pdf(pages: list[list[str]], encoding: str | None = None) -> bytes:
+    """A text-only A4 PDF, one list of lines per page, in Helvetica 11 (the lines must fit the page). Latin-1 text
+    only; `encoding` names the font's encoding (WinAnsiEncoding for accented letters, which then read as Latin-1),
+    none for the font's own."""
+    font = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica%s >>" % (
+        b" /Encoding /" + encoding.encode("ascii") if encoding else b"")
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"", font]
     kids = []
     for lines in pages:
         text = "".join(f"({_pdf_string(line)}) Tj T* " for line in lines)

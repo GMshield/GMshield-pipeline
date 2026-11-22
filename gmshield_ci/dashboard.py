@@ -34,12 +34,13 @@ STAGES = {
                 ("sca_iac:iac", "IaC", "Trivy IaC"), ("sast", "Semg", "Semgrep"),
                 ("sonar", "Sonr", "SonarQube"), ("image", "Img", "image"), ("integration_tests", "Intg", "integration tests"),
                 ("dast", "DAST", "ZAP active"), ("nfr1", "NFR1", "known text at rest"),
-                ("e2e", "E2E", "end-to-end")],
+                ("e2e", "E2E", "end-to-end"), ("leak", "Leak", "SM-1 leak test")],
     "main": [("resolve", "Res", "resolve"), ("promotion", "Prom", "passed develop"), ("image", "Img", "image"),
              ("publish", "Publ", "registry"), ("deploy", "Depl", "deploy"), ("dast_prod", "DAST", "ZAP passive"),
              ("release", "Rel", "release")],
 }
-RELEASE_LINE_WIDTH = 72  # " Latest release: r2026.11.20-2232-077ffbd3 (pipeline, 23h 04m ago)"
+RELEASE_LINE_WIDTH = 68  # " Latest release: r2026.11.20-2232-077ffbd3 (pipeline, 23h 04m ago)", 66, plus 2
+RUNNING_MARK = 2         # " ▶" after When in the row of the repo being run: room table_width keeps for it
 CELL = {"passed": ("ok", "green"), "failed": ("FAIL", "alert"), "skipped": ("skip", "dim")}
 NOT_RUN = ("·", "dim")
 
@@ -264,7 +265,7 @@ def _layout(branch: str, repos: list[str]) -> tuple[list, list[int], int]:
 def table_width(branch: str, repos: list[str]) -> int:
     """Columns the stage table needs: repo, result, one column per stage, and a full date in When."""
     _, cols, rw = _layout(branch, repos)
-    return 1 + rw + 9 + sum(cols) + len("Nov 20 14:56") + 2
+    return 1 + rw + 9 + sum(cols) + len("Nov 20 14:56") + RUNNING_MARK
 
 
 def _section(branch: str, snap: Snapshot, repos: list[str], width: int, height: int, now: datetime) -> list[Line]:
@@ -380,6 +381,10 @@ def render(snap: Snapshot, cols: int, rows: int, now: datetime, color: bool = Fa
         # the left section (develop, with more stages) gets the rest.
         right_w = min((cols - 3) // 2, max(table_width(branches[1], repos), RELEASE_LINE_WIDTH))
         w = cols - 3 - right_w
+        # When develop's table (13 stages) still does not fit, main gives up the room it keeps for the running mark
+        # and the release line's margin, never its table's columns or the release line itself.
+        main_floor = max(table_width(branches[1], repos), RELEASE_LINE_WIDTH) - RUNNING_MARK
+        w = max(w, min(table_width(branches[0], repos), cols - 3 - main_floor))
         left = _section(branches[0], snap, repos, w, body_h, now)
         right = _section(branches[1], snap, repos, cols - 3 - w, body_h, now)
         body = [l + [(" │ ", "dim")] + r for l, r in zip(left, right)]

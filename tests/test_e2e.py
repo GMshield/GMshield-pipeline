@@ -554,8 +554,9 @@ class WhereTest(unittest.TestCase):
     def test_full_develop_runs_of_the_three_apps_end_with_it_without_a_gate(self):
         for svc in ("backend", "frontend", "worker"):
             order = self.flow(svc)
-            self.assertEqual([k for k, _, _ in order], ["sonar", "image", "integration_tests", "dast", "nfr1", "e2e"])
-            self.assertEqual(order[-1][1:], (None, e2e.stage))
+            self.assertEqual([k for k, _, _ in order],
+                             ["sonar", "image", "integration_tests", "dast", "nfr1", "e2e", "leak"])
+            self.assertEqual(order[-2][1:], (None, e2e.stage))      # the SM-1 leak test follows (tests/test_leak.py)
 
     def test_not_in_light_runs_or_the_pipeline_own_runs(self):
         self.assertEqual(self.flow("backend", mode="light"), [])

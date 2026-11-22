@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import e2e, github, gitops, housekeeping, report, sonar, stages
+from . import e2e, github, gitops, housekeeping, leak, report, sonar, stages
 from .config import RUNNER_DIR, Contract, ContractError, Repo, Settings, load_contract
 from .dockerops import Docker, capture, cleanup_label, prune_images, sh
 
@@ -153,7 +153,7 @@ def _passed(run: Run) -> bool:
 
 def develop_flow(run: Run) -> None:
     """develop: unit tests + SAST + secrets + SCA/IaC, image build+scan, active DAST and NFR-1, the end-to-end test
-    (full runs of the backend, frontend and worker), then the gate."""
+    and the SM-1 leak test (full runs of the backend, frontend and worker), then the gate."""
     if run.mode == "light":
         run.log_opts = f"{run.sha}^!"
         _source_checks(run, with_tests=False)
@@ -169,6 +169,7 @@ def develop_flow(run: Run) -> None:
             stages.execute(run, "nfr1", stages.NFR1_TITLE, "nfr1", stages.nfr1_not_run)
         if run.contract.service in e2e.SERVICES:          # no gate key: ok passes, anything else fails the run
             stages.execute(run, "e2e", e2e.TITLE, None, e2e.stage)
+            stages.execute(run, "leak", leak.TITLE, None, leak.stage)   # its own stack: e2e's verdict hides nothing
     run.result = "passed" if _passed(run) else "failed"
     if run.mode == "full" and run.result == "passed":
         promos = _read(run.s.state_dir / "promotions.json", {})
