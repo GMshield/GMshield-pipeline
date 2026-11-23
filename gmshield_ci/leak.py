@@ -14,11 +14,14 @@ on that network) and drives the backend's public API as one new account (`stand-
   campaigns, one at a time;
 - the control: Livro's other tier on, one house question, the tier off again.
 
-Then, from Postgres (each material's passages by the version id its upload returned; each turn's job and the
-campaign of its conversation) and the worker's log (`retrieval.search_done`: the ids each job found and fetched), the
-five checks:
+Then, from Postgres (each material's passages and, from Story 4.3 part C, its records, by the version id its upload
+returned; each turn's job and the campaign of its conversation) and the worker's log (`retrieval.search_done`: the
+passage ids each job found and fetched in `ids`, and the record ids it read in `records`), the five checks (a record's
+id counts as its material's, exactly as a passage's does: an answer that finds or cites a record of a material out of
+its campaign's scope is a leak):
 1. found and fetched: every id a campaign's job found is inside the campaign's allowed set;
-2. cited: every citation event's id and every done reference's ids are inside it;
+2. cited: every citation event's id (a passage's or a record's) and every done reference's ids (its passages, and a
+   record reference's record) are inside it;
 3. clean ends: every turn ends in done, not stopped; an error fails the gate, scope.passage_refused as a found leak;
 4. not empty: in each campaign every allowed material is cited, and every house question asked in Casa cites HA;
 5. control: the control question's found ids hold HA ids, else the gate cannot see a leak.
@@ -78,6 +81,7 @@ CONTROL = {"campaign": "livro", "question": "q01"}
 CHECKS = ("found", "cited", "ended", "exercised", "control")
 MAX_NAMED = 3                                     # foreign ids named in the stage's one-line reason
 PASSAGES_SQL = "select id, version_id from passage"
+RECORDS_SQL = "select id, version_id from record"     # Story 4.3 part C: records are cited and found as passages are
 TURNS_SQL = ("select t.id, t.job_id, c.campaign_id from turn t "
              "join conversation c on c.owner_id = t.owner_id and c.id = t.conversation_id")
 
@@ -146,6 +150,11 @@ def read_passages(container: str) -> dict[str, str]:
     return {r[0]: r[1] for r in psql(container, PASSAGES_SQL) if len(r) == 2}
 
 
+def read_records(container: str) -> dict[str, str]:
+    """{record id: version id} (Story 4.3 part C)."""
+    return {r[0]: r[1] for r in psql(container, RECORDS_SQL) if len(r) == 2}
+
+
 def read_turns(container: str) -> dict[str, dict]:
     """{turn id: {job, campaign}}: each turn's job and its conversation's campaign."""
     return {r[0]: {"job": r[1], "campaign": r[2]} for r in psql(container, TURNS_SQL) if len(r) == 3}
@@ -167,12 +176,13 @@ def log_events(log_text: str, event: str):
 
 
 def found_ids(log_text: str) -> dict[str, set[str]]:
-    """{job id: the passage ids it found and fetched}, from the worker log's retrieval.search_done lines (one per
-    attempt; a line with no tier searched has no ids)."""
+    """{job id: the passage ids it found and fetched, and (Story 4.3 part C) the record ids it read}, from the worker
+    log's retrieval.search_done lines (one per attempt; a line with no tier searched has no ids)."""
     out: dict[str, set[str]] = {}
     for d in log_events(log_text, "retrieval.search_done"):
         if d.get("jobId"):
-            out.setdefault(str(d["jobId"]), set()).update(str(i) for i in d.get("ids") or [])
+            ids = [*(d.get("ids") or []), *(d.get("records") or [])]
+            out.setdefault(str(d["jobId"]), set()).update(str(i) for i in ids)
     return out
 
 
@@ -184,11 +194,15 @@ def _named(foreign: list[dict]) -> str:
 
 
 def judge(record: dict | None, passages: dict[str, str], turns_db: dict[str, dict], found: dict[str, set[str]],
-          rc: int = 0, allowed: dict[str, tuple[str, ...]] | None = None, asked: list[dict] | None = None) -> dict:
-    """The five checks over the runner's record, Postgres' passages and turns, and the worker's found ids. Returns
-    the result: verdict (passed | failed | error), reason, failures, per-campaign and per-turn counts, the control.
-    Only ids, counts, codes and timings: the record holds no text, and none is added."""
+          rc: int = 0, allowed: dict[str, tuple[str, ...]] | None = None, asked: list[dict] | None = None,
+          records: dict[str, str] | None = None) -> dict:
+    """The five checks over the runner's record, Postgres' passages, records (Story 4.3 part C: each record id stands
+    for its material as a passage id does) and turns, and the worker's found ids. Returns the result: verdict (passed
+    | failed | error), reason, failures, per-campaign and per-turn counts, the control. Only ids, counts, codes and
+    timings: the record holds no text, and none is added."""
     allowed = allowed or ALLOWED
+    records = records or {}
+    items = {**passages, **records}
     asked = asked if asked is not None else questions()
     if rc == 124:
         return {"verdict": "error", "reason": "timed out", "failures": []}
@@ -198,13 +212,13 @@ def judge(record: dict | None, passages: dict[str, str], turns_db: dict[str, dic
     by_version = {str(m.get("versionId")): key for key, m in materials.items()}
 
     def material(pid: str) -> str:
-        return by_version.get(passages.get(pid, ""), "unknown")
+        return by_version.get(items.get(pid, ""), "unknown")
 
     def foreign(ids) -> list[dict]:
         return [{"id": p, "material": material(p)} for p in sorted(ids)]
 
     campaign_key = {str(v): k for k, v in (record.get("campaigns") or {}).items()}
-    allowed_ids = {c: {p for p in passages if material(p) in keys} for c, keys in allowed.items()}
+    allowed_ids = {c: {p for p in items if material(p) in keys} for c, keys in allowed.items()}
     turns = [t for t in record["turns"] if isinstance(t, dict)]
     by_turn = {str(t.get("turnId")): t for t in turns if t.get("turnId")}
     control_turn = next((t for t in turns if t.get("phase") == "control"), None)
@@ -301,7 +315,8 @@ def judge(record: dict | None, passages: dict[str, str], turns_db: dict[str, dic
     result = {"questions": len(asked), "expected": expected, "turns": len(rows),
               "clean": sum(1 for r in rows if r["clean"]), "campaigns": campaigns,
               "materials": {k: {"versionId": m.get("versionId"),
-                                "passages": sum(1 for v in passages.values() if v == m.get("versionId"))}
+                                "passages": sum(1 for v in passages.values() if v == m.get("versionId")),
+                                "records": sum(1 for v in records.values() if v == m.get("versionId"))}
                             for k, m in materials.items()},
               "control": control, "failures": failures, "turnsDetail": rows,
               "runner": {"phase": record.get("phase"), "error": record.get("error"),
@@ -378,6 +393,7 @@ def summary(result: dict, shas: dict) -> str:
         lines.append("")
     if result.get("materials"):
         lines.append("Passages: " + ", ".join(f"{k} {m['passages']}" for k, m in result["materials"].items()))
+        lines.append("Records: " + ", ".join(f"{k} {m.get('records', 0)}" for k, m in result["materials"].items()))
         lines.append("")
     ctl = result.get("control")
     if ctl:
@@ -442,11 +458,12 @@ def _session(sess: e2e.Session, by: dict[str, e2e.App], net: str, containers: di
     sess.keep("runner.json")
     record = _read(sess.dir / "runner.json")
     passages = read_passages(containers["postgres"])
+    records = read_records(containers["postgres"])
     turns_db = read_turns(containers["postgres"])
     worker_log = sess.dir / "worker.log"
     container_logs(containers["worker"], worker_log)
     found = found_ids(worker_log.read_text(encoding="utf-8", errors="replace"))
-    result = judge(record, passages, turns_db, found, rc)
+    result = judge(record, passages, turns_db, found, rc, records=records)
     return ("ok" if result["verdict"] == "passed" else "error"), result["reason"], result
 
 

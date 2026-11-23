@@ -163,10 +163,16 @@ def judge(record: dict, job_turn: dict[str, str] | None, found: dict[str, set[st
     library terms found: the record holds no text, and none is added."""
     asked = asked if asked is not None else leak.questions()
     materials = {k: m for k, m in (record.get("materials") or {}).items() if isinstance(m, dict)}
-    material_of = {str(p): key for key, m in materials.items() for p in m.get("passageIds") or []}
+    # Story 4.3 part C: a record id stands for its material as a passage id does (the runner's `recordIds`).
+    material_of = {str(p): key for key, m in materials.items()
+                   for p in [*(m.get("passageIds") or []), *(m.get("recordIds") or [])]}
     unread = sorted(k for k, m in materials.items() if "passageIds" not in m)
+    # the record ids unread (Story 4.3 part C): a cited or found record would look foreign, whatever its material
+    records_unread = record.get("recordIdsError") is not None
     # an allowed material's ids unread: its ids would look foreign, so found and cited cannot be checked at all
     blind = [k for k in unread if any(k in keys for keys in leak.ALLOWED.values())]
+    unreadable = ([f"passage ids unread: {', '.join(unread)}"] if unread else []) + (
+        ["record ids unread: every material"] if records_unread else [])
 
     def foreign(ids) -> list[dict]:
         return [{"id": p, "material": material_of.get(p, "unknown")} for p in sorted(ids)]
@@ -200,7 +206,7 @@ def judge(record: dict, job_turn: dict[str, str] | None, found: dict[str, set[st
         if found is not None and job_turn is not None:
             seen = [found[j] for j in jobs if j in found]
             got = set().union(*seen) if seen else None
-            if got and got - ok_ids and not blind:
+            if got and got - ok_ids and not blind and not records_unread:
                 fail("found", jobs=jobs, foreign=foreign(got - ok_ids))
             elif got is None and ended == "done":
                 unchecked.append({"campaign": name, "question": qid, "jobs": jobs,
@@ -209,7 +215,7 @@ def judge(record: dict, job_turn: dict[str, str] | None, found: dict[str, set[st
             fail("found", jobs=jobs, code=error)
         # 2. cited: the citation events as relayed, and the done event's references
         cited = {str(p) for p in t.get("citations") or []} | {str(p) for ref in t.get("references") or [] for p in ref}
-        if cited - ok_ids and not blind:
+        if cited - ok_ids and not blind and not records_unread:
             fail("cited", foreign=foreign(cited - ok_ids))
         cites = sorted({material_of[p] for p in cited & ok_ids})
         # 3. clean ends: counted by code
@@ -248,13 +254,14 @@ def judge(record: dict, job_turn: dict[str, str] | None, found: dict[str, set[st
     logs_ok = found is not None and job_turn is not None
     why_found = ([] if logs_ok else ["worker or backend log unreadable"]) + (
         [f"passage ids unread: {', '.join(blind)}"] if blind else []) + (
+        ["record ids unread: every material"] if records_unread else []) + (
         [f"{len(unchecked)} done turn(s) not in the logs, first {unchecked[0]['campaign']} "
          f"{unchecked[0]['question']}: {unchecked[0]['code']}"] if unchecked else [])
     checks = {
         "found": {"ok": not why_found and not of("found"), "failures": of("found"), "unchecked": unchecked,
                   **({"code": "; ".join(why_found)} if why_found else {})},
-        "cited": {"ok": not unread and not of("cited"), "failures": of("cited"),
-                  **({"code": f"passage ids unread: {', '.join(unread)}"} if unread else {})},
+        "cited": {"ok": not unreadable and not of("cited"), "failures": of("cited"),
+                  **({"code": "; ".join(unreadable)} if unreadable else {})},
         "ended": {"ok": sum(errors.values()) <= lim.max_errors, "done": sum(1 for r in rows if r["ended"] == "done"),
                   "errors": dict(sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))),
                   "errorCount": sum(errors.values()), "max": lim.max_errors},
@@ -278,8 +285,10 @@ def judge(record: dict, job_turn: dict[str, str] | None, found: dict[str, set[st
               "restated": sum(1 for r in rows if "restated" in r["failed"]), "campaigns": campaigns,
               "materials": {k: {"materialId": m.get("materialId"), "versionId": m.get("versionId"),
                                 "passages": len(m.get("passageIds") or []),
+                                "records": len(m.get("recordIds") or []),
                                 **({"passageIdsError": m["passageIdsError"]} if m.get("passageIdsError") else {})}
                             for k, m in materials.items()},
+              **({"recordIdsError": record["recordIdsError"]} if record.get("recordIdsError") else {}),
               "checks": checks, "turnsDetail": rows}
     result["status"], result["reason"] = _verdict(result, record)
     return result
@@ -377,6 +386,9 @@ def summary_md(res: dict) -> str:
         lines.append("Passages (page views): " + ", ".join(
             f"{k} {m['passages']}" + (f" ({m['passageIdsError']})" if m.get("passageIdsError") else "")
             for k, m in r["materials"].items()))
+        lines.append("Records (record lists): "
+                     + ", ".join(f"{k} {m.get('records', 0)}" for k, m in r["materials"].items())
+                     + (f" ({r['recordIdsError']})" if r.get("recordIdsError") else ""))
         lines.append("")
     failures = [f for k in ("found", "cited", "restated") for f in c[k]["failures"]]
     failures += [{"check": "found (not checked)", **u} for u in c["found"].get("unchecked") or []]

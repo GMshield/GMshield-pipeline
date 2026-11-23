@@ -17,6 +17,8 @@ pontos de vigor do personagem.
 
 Poção de seiva (regra brasaviva). Beber uma poção de seiva cura 4d6
 pontos de vida.
+fake:record item Poção de seiva
 
 Magia (regra cinzarrubra). Lançar um feitiço custa o dobro do seu
 círculo em pontos de essência.
+fake:record spell Feitiço de essência

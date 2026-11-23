@@ -7,6 +7,7 @@ Golpe crítico. Um 8 duplo nos 2d8 de ataque derruba o alvo no convés.
 
 Tempestade de cinzas. Durante uma tempestade de cinzas, cada tripulante
 no convés perde 1 ponto de fôlego por hora.
+fake:record spell Tempestade de cinzas
 
 Poção de sal. Beber uma poção de sal cura 1d8 pontos de vida e remove a
 cegueira das cinzas.
