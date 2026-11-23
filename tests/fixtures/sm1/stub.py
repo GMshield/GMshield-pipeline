@@ -14,6 +14,15 @@ find and cite),
 `found_only` (Livro's jobs find the `leak` passages but cite nothing of them), `cite_only` (the start of a material's
 file name: Livro's turns send its passages as citation events only, neither found nor in the done references), `error` ({question text: error code}),
 `stopped` (question texts whose done event says stopped), `renew_after` (seconds before the session must be renewed).
+
+Part B (tests/test_sm1.py): `given` (a session token the GM already holds: no sign-in), `current` (the account's
+current campaign before the run), `say` ({campaign name: {question text: [delta texts]}}: what the answer says after
+ANSWER-SECRET, in pieces), `deleted_log` (whether a system deletion logs library.system_deleted), `no_job_log` (question
+texts whose job logs no retrieval.search_done line), `no_history` (question texts whose job logs no
+conversation.history_read line), `end_session_after` (the session ends, every token refused, once this many turns
+exist), `current_status` (the status GET /api/v1/campaigns/current answers instead of 200). It serves the owner-review page view (two pages per material, one
+passage each), the system deletion and its preview, and `backend_log()` (conversation.history_read lines with a decoy
+of another account's job, and library.system_deleted). `requests` counts every request.
 """
 from __future__ import annotations
 
@@ -33,8 +42,16 @@ def _id() -> str:
 
 
 class State:
-    def __init__(self, leak=None, found_only=False, error=None, stopped=(), renew_after=900, cite_only=None):
+    def __init__(self, leak=None, found_only=False, error=None, stopped=(), renew_after=900, cite_only=None,
+                 given=None, current=None, say=None, deleted_log=True, no_job_log=(), no_history=(),
+                 end_session_after=None, current_status=None):
         self.lock = threading.Lock()
+        self.say, self.deleted_log, self.no_job_log = say or {}, deleted_log, set(no_job_log)
+        self.no_history, self.end_session_after, self.current_status = set(no_history), end_session_after, current_status
+        self.requests = 0
+        self.deleting: set[str] = set()
+        self.backend_lines: list[str] = [json.dumps({"event": "conversation.history_read", "jobId": "job-decoy",
+                                                     "turnId": "turn-decoy", "history": 0})]
         self.leak, self.found_only, self.cite_only = leak, found_only, cite_only
         self.error, self.stopped = error or {}, set(stopped)
         self.renew_after = renew_after
@@ -47,7 +64,9 @@ class State:
         self.passage_rows: dict[str, str] = {}            # passage id -> version id
         self.turn_rows: dict[str, dict] = {}              # turn id -> {job, campaign, events}
         self.log_lines: list[str] = []
-        self.current: str | None = None
+        self.current: str | None = current
+        if given:
+            self.tokens.add(given)
         self.indexing_polls = 0
         self.unauthorized = 0
 
@@ -107,6 +126,7 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def _authorized(self, session: bool = True) -> bool:
+        self.st.requests += 1
         if self.headers.get("Authorization") != f"Bearer {FRONTEND}":
             self.st.unauthorized += 1
             self._problem(401, "service.unauthenticated")
@@ -202,6 +222,25 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._problem(404, "request.not_found")
 
+    def do_DELETE(self):  # noqa: N802
+        if not self._authorized():
+            return
+        path = urlparse(self.path).path
+        st = self.st
+        parts = path.strip("/").split("/")
+        if parts[:3] == ["api", "v1", "systems"] and len(parts) == 4:
+            sid = parts[3]
+            if sid not in st.systems or sid in st.deleting:
+                self._problem(404, "request.not_found")
+                return
+            st.deleting.add(sid)
+            if st.deleted_log:
+                st.backend_lines.append(json.dumps({"event": "library.system_deleted", "systemId": sid,
+                                                    "deletionId": _id(), "campaigns": 1}))
+            self._send(202, None)
+        else:
+            self._problem(404, "request.not_found")
+
     def do_PATCH(self):  # noqa: N802
         if not self._authorized():
             return
@@ -237,8 +276,38 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         if not self._authorized():
             return
-        path = urlparse(self.path).path
+        url = urlparse(self.path)
+        path = url.path
         st = self.st
+        parts = path.strip("/").split("/")
+        if parts[:3] == ["api", "v1", "materials"] and len(parts) == 6 and parts[4] == "pages":
+            m = st.materials.get(parts[3])
+            if m is None or url.query != "ground=review" or m["state"] not in ("needs_review", "ready"):
+                self._problem(404, "request.not_found")
+                return
+            ids = sorted(p for p, v in st.passage_rows.items() if v == m["version"])
+            page = int(parts[5])
+            if not 1 <= page <= len(ids):
+                self._problem(404, "request.not_found")
+                return
+            self._send(200, {"page": page, "pageTotal": len(ids), "picture": None, "lines": [],
+                             "text": "PASSAGE-SECRET", "passages": [{"id": ids[page - 1], "range": [0, 5]}],
+                             "outcome": "read_directly"})
+            return
+        if path == "/api/v1/campaigns/current":
+            if st.current_status:
+                self._problem(st.current_status, f"http.{st.current_status}")
+            elif st.current is None:
+                self._problem(404, "request.not_found")
+            else:
+                self._send(200, {"id": st.current, "name": "NAME-SECRET"})
+            return
+        if parts[:3] == ["api", "v1", "systems"] and len(parts) == 5 and parts[4] == "deletion":
+            if parts[3] not in st.systems or parts[3] in st.deleting:
+                self._problem(404, "request.not_found")
+            else:
+                self._send(200, {"campaigns": 1, "conversations": 0, "materials": 1})
+            return
         if path.startswith("/api/v1/materials/"):
             m = st.materials.get(path.split("/")[4])
             if m is None:
@@ -271,17 +340,24 @@ class Handler(BaseHTTPRequestHandler):
         tid, job = _id(), _id()
         q = b["question"]
         ids = st.allowed(cid)
-        livro = st.campaigns[cid]["name"] == "Livro"
+        livro = st.campaigns[cid]["name"].split(" · ")[0] == "Livro"
         leaked = []
         if st.leak and livro:
             leaked = [p for p, v in st.passage_rows.items()
                       for m in st.materials.values() if m["version"] == v and m["key"].startswith(st.leak)]
         found = ids + leaked
         cited = ids + ([] if st.found_only else leaked)
-        st.log_lines.append("2026-11-22T12:00:00.000000000Z " + json.dumps(
+        if q not in st.no_history:
+            st.backend_lines.append(json.dumps({"timestamp": "2026-11-22T12:00:00.000Z", "level": "INFO",
+                                                "event": "conversation.history_read", "jobId": job, "turnId": tid,
+                                                "conversationId": _id(), "history": 0}))
+        if q not in st.no_job_log:
+            st.log_lines.append("2026-11-22T12:00:00.000000000Z " + json.dumps(
             {"timestamp": "2026-11-22T12:00:00.000Z", "level": "INFO", "unit": "lane.answer",
              "event": "retrieval.search_done", "jobId": job, "tiers": 2, "handed": len(found), "ids": found}))
         events = [("delta", {"text": "ANSWER-SECRET "})]
+        events += [("delta", {"text": piece}) for piece in st.say.get(st.campaigns[cid]["name"].split(" · ")[0], {})
+                   .get(q, [])]
         if q in st.error:
             events.append(("error", {"code": st.error[q]}))
         else:
@@ -296,6 +372,8 @@ class Handler(BaseHTTPRequestHandler):
                                                     "sectionPath": [], "materialName": "NAME-SECRET"}
                                                    for n, v in enumerate(refs.values(), 1)]}))
         st.turn_rows[tid] = {"job": job, "campaign": cid, "events": events}
+        if st.end_session_after is not None and len(st.turn_rows) >= st.end_session_after:
+            st.tokens.clear()
         self._send(201, {"id": tid, "conversationId": _id(), "language": "pt-BR"})
 
     def _events(self, tid: str):
@@ -343,3 +421,7 @@ class Backend:
 
     def worker_log(self) -> str:
         return "\n".join(self.state.log_lines) + "\n"
+
+    def backend_log(self) -> str:
+        """As `docker logs --timestamps`: each line after the time it was written (here one fixed past time)."""
+        return "".join(f"2026-11-22T11:00:00.000000000Z {line}\n" for line in self.state.backend_lines)
