@@ -258,6 +258,23 @@ class MatrixTest(unittest.TestCase):
         self.assertEqual(len(cited), 40)
         self.assertEqual(r.state.deleting, set(r.state.systems))
 
+    def test_records_cited_within_the_scope_pass_and_a_leaked_record_is_named(self):
+        # Story 4.3 part C: each material's record ids are read from its systems' record lists, so a record the answer
+        # finds and cites stands for its material; a record of another campaign's material is a leak.
+        r = Run(self, records=True)
+        self.assertEqual(r.code, 0, r.res["reason"])
+        materials = r.res["result"]["materials"]
+        self.assertEqual({k: m["records"] for k, m in materials.items()}, {"R": 1, "HA": 1, "NB": 1, "X": 1})
+        self.assertIn("Records (record lists): R 1, HA 1, NB 1, X 1", r.summary)
+        r.assert_no_text(self)
+        r = Run(self, records=True, leak="casa", found_only=True)
+        self.assertEqual(r.code, 1)
+        version = r.res["result"]["materials"]["HA"]["versionId"]
+        ha = next(rid for rid, v in r.state.record_rows.items() if v == version)
+        found = r.res["result"]["checks"]["found"]["failures"]
+        self.assertEqual(len(found), 40)
+        self.assertTrue(all({"id": ha, "material": "HA"} in f["foreign"] for f in found))
+
     def test_out_of_scope_id_found_only_or_cited_only(self):
         r = Run(self, leak="casa", found_only=True)
         self.assertTrue(r.res["reason"].startswith("leak found: Livro q01 HA:"), r.res["reason"])
@@ -520,6 +537,18 @@ class JudgeTest(unittest.TestCase):
         res = self.judge(rec)
         self.assertEqual(res["reason"], "cannot check (cited): passage ids unread: X")
         self.assertEqual(res["materials"]["X"]["passageIdsError"], "page 1 of X: request.not_found")
+
+    def test_unread_record_ids_cannot_be_checked(self):
+        rec = copy.deepcopy(self.rec)
+        rec["recordIdsError"] = "record types: http.503"
+        res = self.judge(rec)
+        self.assertEqual(res["status"], "fail")
+        self.assertEqual(res["reason"], "cannot check (found and fetched): record ids unread: every material")
+        for check in ("found", "cited"):
+            self.assertEqual(res["checks"][check]["failures"], [])
+            self.assertFalse(res["checks"][check]["ok"])
+            self.assertEqual(res["checks"][check]["code"], "record ids unread: every material")
+        self.assertEqual(res["recordIdsError"], "record types: http.503")
 
     def test_an_allowed_materials_unread_ids_name_no_leak(self):
         rec = copy.deepcopy(self.rec)
