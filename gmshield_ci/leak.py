@@ -151,21 +151,28 @@ def read_turns(container: str) -> dict[str, dict]:
     return {r[0]: {"job": r[1], "campaign": r[2]} for r in psql(container, TURNS_SQL) if len(r) == 3}
 
 
-def found_ids(log_text: str) -> dict[str, set[str]]:
-    """{job id: the passage ids it found and fetched}, from the worker log's retrieval.search_done lines (one per
-    attempt; a line with no tier searched has no ids). Each line may carry `docker logs --timestamps`' prefix."""
-    out: dict[str, set[str]] = {}
+def log_events(log_text: str, event: str):
+    """The JSON lines of an app's log that record `event`, as dicts. Each line may carry `docker logs --timestamps`'
+    prefix; other lines are skipped."""
     for line in log_text.splitlines():
         start = line.find("{")
-        if start < 0 or "retrieval.search_done" not in line:
+        if start < 0 or event not in line:
             continue
         try:
             d = json.loads(line[start:])
         except ValueError:
             continue
-        if not isinstance(d, dict) or d.get("event") != "retrieval.search_done" or not d.get("jobId"):
-            continue
-        out.setdefault(str(d["jobId"]), set()).update(str(i) for i in d.get("ids") or [])
+        if isinstance(d, dict) and d.get("event") == event:
+            yield d
+
+
+def found_ids(log_text: str) -> dict[str, set[str]]:
+    """{job id: the passage ids it found and fetched}, from the worker log's retrieval.search_done lines (one per
+    attempt; a line with no tier searched has no ids)."""
+    out: dict[str, set[str]] = {}
+    for d in log_events(log_text, "retrieval.search_done"):
+        if d.get("jobId"):
+            out.setdefault(str(d["jobId"]), set()).update(str(i) for i in d.get("ids") or [])
     return out
 
 

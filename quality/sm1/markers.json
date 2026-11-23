@@ -1,0 +1,75 @@
+{
+  "about": "The restatement oracle of the SM-1 real-model run (Story 3.13 part B, gmshield_ci/sm1.py). Words of the invented library (library/*.txt), never answer text: each material's markers (its own names) and phrases (what only its rules say), and `translations`, the same phrases in English, for the English questions. None of them occurs in a question or in a material a campaign may use, so an answer that holds one restates that material. Matching folds case, accents and whitespace, at the start of a word. Quirino and Pedra Torta are not NB markers: the questions name them. A term matches at the start of a word, so a stem (\"tripl\": triplicado, triplica, triplo, triple) covers the inflections; the longer term is named when both match. An answer that paraphrases a material without any listed word is not caught.",
+  "materials": {
+    "HA": {
+      "markers": [
+        "corvoalto",
+        "pedrafunda",
+        "ventolargo",
+        "luzerna",
+        "brasaviva",
+        "cinzarrubra"
+      ],
+      "phrases": [
+        "triplicado",
+        "tripl",
+        "4d6",
+        "cinco falhas",
+        "Ninguém rola iniciativa",
+        "o mestre age por último",
+        "um 9 ou um 10",
+        "o dobro do seu círculo"
+      ],
+      "translations": [
+        "five fail",
+        "nobody rolls initiative",
+        "no one rolls initiative",
+        "9 or a 10",
+        "9 or 10",
+        "twice its circle",
+        "twice the spell's circle",
+        "double its circle"
+      ]
+    },
+    "NB": {
+      "markers": [
+        "Odília",
+        "Tibúrcio",
+        "rio Sombrio",
+        "ferro negro",
+        "mina abandonada"
+      ],
+      "phrases": [],
+      "translations": []
+    },
+    "X": {
+      "markers": [
+        "Mar de Cinzas",
+        "tripulante",
+        "convés",
+        "2d8"
+      ],
+      "phrases": [
+        "poção de sal",
+        "tempestade de cinzas",
+        "navio de cinzas",
+        "cegueira das cinzas"
+      ],
+      "translations": [
+        "salt potion",
+        "ash storm",
+        "ash ship"
+      ]
+    }
+  },
+  "forbidden": {
+    "casa": [
+      "NB",
+      "X"
+    ],
+    "livro": [
+      "HA",
+      "X"
+    ]
+  }
+}
