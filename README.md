@@ -411,7 +411,8 @@ any listed word is not caught. Each answer's text is read from its `delta` event
 only the terms found are kept.
 
 From Story 4.3 part C answers also find and cite records: after the questions the runner reads each material's record
-ids from its systems' record lists (`GET /api/v1/systems/{id}/record-types`, then each type's records, matched to the
+ids from its systems' record lists (`GET /api/v1/systems/{id}/record-types`, every page by `offset` from Story 4.4 part
+B, since a system's core and approved types may pass 50; then each type's records, matched to the
 material by its name; `recordIds`), so a record id found (a `search_done` line's `records`) or cited stands for its
 material as a passage id does. The result and summary count each material's records.
 

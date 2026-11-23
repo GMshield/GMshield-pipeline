@@ -332,15 +332,22 @@ class Handler(BaseHTTPRequestHandler):
             if parts[3] not in st.systems or parts[3] in st.deleting:
                 self._problem(404, "request.not_found")
                 return
+            # Story 4.4 part B: more than 50 types, paged by offset; the records are all of an approved type (core
+            # null, key `talento`) on the second page, so a runner that reads one page finds none.
             n = len(st.records_of_system(parts[3]))
-            self._send(200, {"items": [{"id": f"type-{parts[3]}", "core": "spell", "name": "spell", "records": n,
-                                        "version": 0}], "total": 1})
+            kinds = [{"id": f"empty-{parts[3]}-{i}", "core": None, "key": f"t{i}", "name": f"T{i}", "records": 0,
+                      "version": 0} for i in range(52)]
+            kinds.append({"id": f"type-{parts[3]}", "core": None, "key": "talento", "name": "Talento", "records": n,
+                          "version": 0})
+            query = dict(item.split("=", 1) for item in url.query.split("&") if "=" in item)
+            limit, offset = int(query.get("limit", "20")), int(query.get("offset", "0"))
+            self._send(200, {"items": kinds[offset:offset + min(limit, 50)], "total": len(kinds)})
             return
         if parts[:3] == ["api", "v1", "record-types"] and len(parts) == 5 and parts[4] == "records":
             sid = parts[3].removeprefix("type-")
             query = dict(item.split("=", 1) for item in url.query.split("&") if "=" in item)
             limit, offset = int(query.get("limit", "20")), int(query.get("offset", "0"))
-            found = st.records_of_system(sid)
+            found = [] if parts[3].startswith("empty-") else st.records_of_system(sid)
             self._send(200, {"items": [{"id": r, "name": "NAME-SECRET", "materialName": f"NAME-SECRET {m['key']}",
                                         "page": 1} for r, m in found[offset:offset + limit]], "total": len(found)})
             return
