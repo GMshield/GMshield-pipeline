@@ -23,6 +23,14 @@ The record (`out`, runner.json) holds ids, counts, codes, scope versions and tim
 passage ids, its references' passage ids, its last event id and how it ended. Never a question's answer or a
 passage's text, and no name. Exit status 0 when every step ran (whatever the answers), 2 when the run stopped; the
 record then says where (`error`).
+
+Part B (Story 3.13, `gmshield_ci sm1`, the real model on roberto-server) runs it in-process through `run_all`, with
+these keys besides: "session" ({token, file}: a signed-in GM's session, so there is no sign-in; each renewed token is
+written back to the file, mode 600), "suffix" (added to every system and campaign name, " · <suffix>"), "markers"
+({material key: [terms]}: each answer's text is read from its delta events in memory, matched, and dropped; only the
+terms found are recorded), "pageIds" (each material's passage ids read through the owner-review page view), "delete"
+(the run's systems deleted at the end, after a failure too) and no "control". The account's current campaign is put
+back as it was before the deletion.
 """
 from __future__ import annotations
 
@@ -30,8 +38,11 @@ import base64
 import hashlib
 import http.client
 import json
+import os
+import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,7 +60,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect)
-DEFAULT_LIMITS = {"question": 120, "material": 600, "indexing": 600, "poll": 1.0}
+DEFAULT_LIMITS = {"question": 120, "material": 600, "indexing": 600, "poll": 1.0, "deletion": 120}
 SETTLED = ("needs_review", "ready", "failed", "discarded")
 
 
@@ -90,6 +101,8 @@ class Api:
     token: str = ""
     renew_at: float = 0.0
     renewals: int = 0
+    session_file: str = ""             # session given: each renewed token is written back here (mode 600)
+    session_given: bool = False        # session given: a refusal that the session ended stops the run at once
 
     def headers(self, extra: dict | None = None) -> dict:
         h = {"Authorization": f"Bearer {self.credential}", "Accept": "application/json"}
@@ -117,15 +130,25 @@ class Api:
                 data = b""
             finally:
                 e.close()
-            return Reply(e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, data)
+            return self.ended(path, Reply(e.code, {k.lower(): v for k, v in (e.headers or {}).items()}, data))
         except (OSError, http.client.HTTPException) as e:
             return Reply(0, {}, json.dumps({"code": f"backend.unreachable ({type(e).__name__})"}).encode())
+
+    def ended(self, path: str, r: Reply) -> Reply:
+        """Session given: a 401 session.* refusal means the GM's session is over, and every later call would be
+        refused too, so the run stops at once (the renewal reports its own refusal)."""
+        if (self.session_given and r.status == 401 and r.code.startswith("session.")
+                and path != "/api/v1/session/renewal"):
+            raise Stop(f"the session ended ({r.code})")
+        return r
 
     def grant(self, g: dict) -> None:
         token = g.get("sessionToken")
         if not isinstance(token, str) or not token:
             raise Stop("the session grant holds no token")
         self.token = token
+        if self.session_file:
+            save_token(Path(self.session_file), token)
         after = g.get("renewAfterSeconds")
         after = after if isinstance(after, int) and after >= 0 else 900
         self.renew_at = time.monotonic() + after * 0.8
@@ -143,6 +166,42 @@ class Api:
         if r.status != status:
             raise Stop(f"{what}: {r.code}")
         return r.json()
+
+
+def save_token(path: Path, token: str) -> None:
+    """Writes the session token to its file, mode 600, by a rename (never half written)."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(token + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------ the answer's words (part B)
+
+_SPACE = re.compile(r"\s+")
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u00ad": None})
+
+
+def normalise(text: str) -> str:
+    """Case, accents and whitespace folded: NFKD with the combining marks dropped, casefolded, whitespace collapsed."""
+    t = unicodedata.normalize("NFKD", text.translate(_QUOTES))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return _SPACE.sub(" ", t.casefold()).strip()
+
+
+def markers_in(text: str, markers: dict) -> list[str]:
+    """The terms of `markers` ({material key: [terms]}) the text holds, as "KEY:term" (the term as written in
+    markers.json). A term matches at the start of a word, so an inflected form ("tripulantes") counts."""
+    norm = normalise(text)
+    out = []
+    for key, terms in markers.items():
+        hits = [(normalise(term), term) for term in terms]
+        hits = [(n, term) for n, term in hits if n and re.search(r"(?<!\w)" + re.escape(n), norm)]
+        # a stem ("tripl") is not named again when a longer term it starts ("triplicado") matched too
+        out += [f"{key}:{term}" for n, term in hits if not any(o != n and o.startswith(n) for o, _ in hits)]
+    return out
 
 
 # ------------------------------------------------------------------ sign-in and the library
@@ -210,6 +269,20 @@ def wait_state(api: Api, key: str, material_id: str, wanted: tuple[str, ...], li
         if time.monotonic() >= end:
             raise Stop(f"material {key} still {state} after {limits['material']}s")
         time.sleep(limits["poll"])
+
+
+def page_ids(api: Api, key: str, material_id: str) -> list[str]:
+    """Every passage id of the material's current version, page by page, through the owner-review page view."""
+    ids: list[str] = []
+    page, total = 1, 1
+    while page <= total:
+        api.renew_if_due()
+        view = api.expect(api.call("GET", f"/api/v1/materials/{material_id}/pages/{page}?ground=review"), 200,
+                          f"page {page} of {key}")
+        total = view.get("pageTotal") if isinstance(view.get("pageTotal"), int) else page
+        ids += [str(p.get("id")) for p in view.get("passages") or [] if isinstance(p, dict) and p.get("id")]
+        page += 1
+    return list(dict.fromkeys(ids))
 
 
 def choose(api: Api, campaign_id: str) -> None:
@@ -307,18 +380,30 @@ class Turn:
     events: int = 0
     last_event_id: str | None = None
     ms: int | None = None
+    markers: list | None = None        # part B: the library terms the answer's text holds (never the text)
 
     def record(self) -> dict:
         return {"phase": self.phase, "campaign": self.campaign, "question": self.question, "kind": self.kind,
                 "scopeVersion": self.scope_version, "turnId": self.turn_id, "conversationId": self.conversation_id,
                 "ended": self.ended, "error": self.error, "stopped": self.stopped, "silent": self.silent,
                 "citations": self.citations, "references": self.references, "events": self.events,
-                "lastEventId": self.last_event_id, "ms": self.ms}
+                "lastEventId": self.last_event_id, "ms": self.ms, "markers": self.markers}
 
 
-def ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float) -> Turn:
+def ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float, markers: dict | None = None) -> Turn:
     """Asks one question in a new questions conversation and follows its events to done or error. Keeps ids and
-    codes only: never the answer's text."""
+    codes only: never the answer's text. With `markers`, the text of the delta events is held in memory until the
+    turn ends, then only the terms it holds are kept (`t.markers`) and the text is dropped."""
+    words: list[str] = []
+    try:
+        return _ask(api, t, campaign_id, question, limit, words if markers is not None else None)
+    finally:
+        if markers is not None:
+            t.markers = markers_in("".join(words), markers)
+        words.clear()
+
+
+def _ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float, words: list | None) -> Turn:
     api.renew_if_due()
     t0 = time.monotonic()
     r = api.call("POST", f"/api/v1/campaigns/{campaign_id}/turns", {"question": question, "area": "questions"})
@@ -340,7 +425,9 @@ def ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float) -> Tur
         except ValueError:
             body = {}
         body = body if isinstance(body, dict) else {}
-        if name == "citation":
+        if name == "delta" and words is not None and isinstance(body.get("text"), str):
+            words.append(body["text"])
+        elif name == "citation":
             t.citations.append(str(body.get("passageId")))
         elif name == "done":
             t.ended, done = "done", True
@@ -366,7 +453,7 @@ def ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float) -> Tur
                 sse_events(resp, on_event, deadline)
         except urllib.error.HTTPError as e:
             with e:
-                code = Reply(e.code, {}, e.read() if e.fp else b"").code
+                code = api.ended(f"/api/v1/turns/{t.turn_id}/events", Reply(e.code, {}, e.read() if e.fp else b"")).code
             if e.code < 500:
                 t.ended, t.error = "error", f"events:{code}"
                 break
@@ -382,34 +469,75 @@ def ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float) -> Tur
 
 # ------------------------------------------------------------------ the run
 
-def run(cfg: dict, record: dict) -> None:
+def new_record() -> dict:
+    return {"phase": "start", "error": None, "systems": {}, "campaigns": {}, "materials": {}, "scopes": {},
+            "turns": [], "control": None, "timings": {}, "renewals": 0}
+
+
+def make_api(cfg: dict) -> Api:
+    """The API client: signed out (part A signs in), or holding the given session (part B)."""
+    api = Api(cfg["base"].rstrip("/"), cfg["credential"])
+    session = cfg.get("session")
+    if session:
+        api.token, api.session_file = str(session["token"]), str(session.get("file") or "")
+        api.session_given = True
+    return api
+
+
+def named(name: str, suffix: str | None) -> str:
+    return f"{name} · {suffix}" if suffix else name
+
+
+def current_campaign(api: Api) -> tuple[str | None, str | None]:
+    """(the account's current campaign, None), (None, None) when it has none (404), or (None, the refusal's code)
+    when it could not be read: the run then cannot put it back."""
+    r = api.call("GET", "/api/v1/campaigns/current")
+    if r.status == 200 and r.json().get("id"):
+        return str(r.json()["id"]), None
+    return None, None if r.status == 404 else r.code
+
+
+def run(cfg: dict, record: dict, api: Api | None = None) -> None:
     limits = {**DEFAULT_LIMITS, **(cfg.get("limits") or {})}
     clock = Clock(time.monotonic() + float(cfg.get("budget") or 1800))
-    api = Api(cfg["base"].rstrip("/"), cfg["credential"])
+    api = api or make_api(cfg)
     timings = record["timings"]
     questions = json.loads(Path(cfg["questions"]).read_text(encoding="utf-8"))
     by_id = {q["id"]: q for q in questions}
+    suffix, markers = cfg.get("suffix"), cfg.get("markers")
 
     def phase(name: str) -> float:
         record["phase"] = name
         clock.left()
         return time.monotonic()
 
-    t0 = phase("sign_in")
-    sign_in(api, cfg["code"], cfg["username"])
-    timings["signIn"] = round(time.monotonic() - t0, 1)
+    if api.token:                                   # session given: the GM is signed in already
+        t0 = phase("session")
+        api.renew_if_due()
+        record["previousCurrent"], error = current_campaign(api)
+        if error:
+            record["previousCurrentError"] = error
+        timings["session"] = round(time.monotonic() - t0, 1)
+    else:
+        t0 = phase("sign_in")
+        sign_in(api, cfg["code"], cfg["username"])
+        timings["signIn"] = round(time.monotonic() - t0, 1)
 
     t0 = phase("library")
     places = {"systems": record["systems"], "campaigns": record["campaigns"]}
     for s in cfg["systems"]:
-        made = api.expect(api.call("POST", "/api/v1/systems", {"name": s["name"]}), 201, f"system {s['key']}")
+        api.renew_if_due()
+        made = api.expect(api.call("POST", "/api/v1/systems", {"name": named(s["name"], suffix)}), 201,
+                          f"system {s['key']}")
         record["systems"][s["key"]] = str(made["id"])
     for c in cfg["campaigns"]:
+        api.renew_if_due()
         made = api.expect(api.call("POST", "/api/v1/campaigns",
-                                   {"name": c["name"], "systemId": record["systems"][c["system"]]}), 201,
-                          f"campaign {c['key']}")
+                                   {"name": named(c["name"], suffix), "systemId": record["systems"][c["system"]]}),
+                          201, f"campaign {c['key']}")
         record["campaigns"][c["key"]] = str(made["id"])
     for m in cfg["materials"]:
+        api.renew_if_due()
         record["materials"][m["key"]] = upload(api, m, Path(m["file"]).read_bytes(), places)
     timings["library"] = round(time.monotonic() - t0, 1)
 
@@ -437,46 +565,118 @@ def run(cfg: dict, record: dict) -> None:
             t = Turn("main", key, q["id"], q["kind"], record["scopes"][key]["version"])
             record["turns"].append(t.record())
             try:
-                ask(api, t, cid, q["question"], min(limits["question"], clock.left()))
+                ask(api, t, cid, q["question"], min(limits["question"], clock.left()), markers)
             finally:                                # the turn's id is kept even when the run stops inside it
                 record["turns"][-1] = t.record()
     timings["questions"] = round(time.monotonic() - t0, 1)
 
-    t0 = phase("control")
-    ctl = cfg["control"]
-    key, cid = ctl["campaign"], record["campaigns"][ctl["campaign"]]
-    control = record["control"] = {"campaign": key, "question": ctl["question"], "scopeVersionOn": None,
-                                   "scopeVersionOff": None, "otherTierOff": False}
-    on = set_other_tier(api, key, cid, True)
-    control["scopeVersionOn"] = on["version"]
-    timings["indexing.control"] = wait_indexed(api, key, cid, limits, clock)
-    q = by_id[ctl["question"]]
-    t = Turn("control", key, q["id"], q["kind"], on["version"])
-    record["turns"].append(t.record())
-    try:
-        ask(api, t, cid, q["question"], min(limits["question"], clock.left()))
-    finally:
-        record["turns"][-1] = t.record()
-    off = set_other_tier(api, key, cid, False)
-    control["scopeVersionOff"], control["otherTierOff"] = off["version"], off["otherTier"] is False
-    timings["control"] = round(time.monotonic() - t0, 1)
+    ctl = cfg.get("control")
+    if ctl:
+        t0 = phase("control")
+        key, cid = ctl["campaign"], record["campaigns"][ctl["campaign"]]
+        control = record["control"] = {"campaign": key, "question": ctl["question"], "scopeVersionOn": None,
+                                       "scopeVersionOff": None, "otherTierOff": False}
+        on = set_other_tier(api, key, cid, True)
+        control["scopeVersionOn"] = on["version"]
+        timings["indexing.control"] = wait_indexed(api, key, cid, limits, clock)
+        q = by_id[ctl["question"]]
+        t = Turn("control", key, q["id"], q["kind"], on["version"])
+        record["turns"].append(t.record())
+        try:
+            ask(api, t, cid, q["question"], min(limits["question"], clock.left()), markers)
+        finally:
+            record["turns"][-1] = t.record()
+        off = set_other_tier(api, key, cid, False)
+        control["scopeVersionOff"], control["otherTierOff"] = off["version"], off["otherTier"] is False
+        timings["control"] = round(time.monotonic() - t0, 1)
     record["renewals"] = api.renewals
     record["phase"] = "complete"
 
 
-def main(argv: list[str]) -> int:
-    cfg = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
-    record: dict = {"phase": "start", "error": None, "systems": {}, "campaigns": {}, "materials": {}, "scopes": {},
-                    "turns": [], "control": None, "timings": {}, "renewals": 0}
+def _reason(e: BaseException) -> str:
+    """A step's failure as recorded: a Stop's own words (codes and keys only), else the exception's type only."""
+    return str(e) if isinstance(e, Stop) else type(e).__name__
+
+
+def run_all(cfg: dict, record: dict, api: Api | None = None) -> None:
+    """`run`, then, whatever happened (a stop, an error, Ctrl-C): the account's current campaign put back (part B),
+    each material's passage ids read (`pageIds`), and the run's systems deleted (`delete`) or kept. Every failure is
+    recorded in `record`, never raised."""
+    api = api or make_api(cfg)
     t0 = time.monotonic()
     try:
-        run(cfg, record)
+        run(cfg, record, api)
     except Stop as e:
         record["error"] = f"{record['phase']}: {e}"
+    except KeyboardInterrupt:
+        record["error"] = f"{record['phase']}: interrupted"
     except Exception as e:  # noqa: BLE001 - recorded by type only: a message could carry a body
         record["error"] = f"{record['phase']}: {type(e).__name__}"
     finally:
-        record["timings"]["total"] = round(time.monotonic() - t0, 1)
+        limits = {**DEFAULT_LIMITS, **(cfg.get("limits") or {})}
+        try:
+            finish(cfg, record, api, limits)
+        finally:
+            record["renewals"] = api.renewals
+            record["timings"]["total"] = round(time.monotonic() - t0, 1)
+
+
+def finish(cfg: dict, record: dict, api: Api, limits: dict) -> None:
+    if record.get("previousCurrent"):
+        try:
+            api.renew_if_due()
+            r = api.call("PUT", "/api/v1/campaigns/current", {"campaignId": record["previousCurrent"]})
+            record["currentRestored"] = True if r.status == 200 else r.code
+        except Exception as e:  # noqa: BLE001 - the deletion must still run
+            record["currentRestored"] = _reason(e)
+    if cfg.get("pageIds"):
+        for key, m in record["materials"].items():
+            try:
+                m["passageIds"] = page_ids(api, key, m["materialId"])
+            except Exception as e:  # noqa: BLE001 - recorded; the deletion must still run
+                m["passageIdsError"] = _reason(e)
+    if record["systems"]:
+        if cfg.get("delete"):
+            record["deletion"] = delete_library(api, record, limits)
+        else:
+            record["deletion"] = {"kept": True, "systems": [{"key": k, "id": v, "delete": None, "gone": False}
+                                                            for k, v in record["systems"].items()]}
+
+
+def delete_library(api: Api, record: dict, limits: dict) -> dict:
+    """Deletes each of the run's systems (Story 3.1 part B: its campaigns, their conversations and its materials go
+    with it), then polls its deletion preview until the system is not found. `delete`: started (202), not_found (404:
+    already deleting or gone) or the refusal's code; `gone`: the preview answered not found."""
+    out: dict = {"kept": False, "systems": [], "startedAt": time.time()}
+    for key, sid in record["systems"].items():
+        item: dict = {"key": key, "id": sid, "delete": None, "gone": False}
+        out["systems"].append(item)
+        try:
+            api.renew_if_due()
+            r = api.call("DELETE", f"/api/v1/systems/{sid}")
+            item["delete"] = {202: "started", 404: "not_found"}.get(r.status, r.code)
+            if r.status not in (202, 404):
+                continue
+            end = time.monotonic() + float(limits["deletion"])
+            while True:
+                api.renew_if_due()
+                if api.call("GET", f"/api/v1/systems/{sid}/deletion").status == 404:
+                    item["gone"] = True
+                    break
+                if time.monotonic() >= end:
+                    break
+                time.sleep(limits["poll"])
+        except Exception as e:  # noqa: BLE001 - the other system must still be deleted
+            item["error"] = _reason(e)
+    return out
+
+
+def main(argv: list[str]) -> int:
+    cfg = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+    record = new_record()
+    try:
+        run_all(cfg, record)
+    finally:
         out = Path(cfg["out"])
         tmp = out.with_name(out.name + ".tmp")
         tmp.write_text(json.dumps(record, indent=1))

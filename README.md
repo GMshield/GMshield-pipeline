@@ -208,6 +208,7 @@ Detailed reports are in each run's folder under `~/gmshield-ci/artifacts/`.
 | SM-2: sourced answers on the SRD (below) | `python3 -m gmshield_ci sm2 --session-file ~/.config/gmshield/sm2-session` |
 | End-to-end test of the latest develop images (below) | `python3 -m gmshield_ci e2e` |
 | SM-1 leak test of the latest develop images (below) | `python3 -m gmshield_ci leak` |
+| SM-1 with the real model, against production (below) | `python3 -m gmshield_ci sm1 --session-file ~/.config/gmshield/sm1-session` |
 
 ### SM-2: sourced answers on the SRD (Story 2.9)
 
@@ -366,6 +367,87 @@ By hand, against the latest develop image of all three repos: `python3 -m gmshie
 it takes the poll lock (when a run is in progress it says so and exits 1), removes everything it made,
 and exits 0 only when every check passes. Its files go to
 `~/gmshield-ci/artifacts/quality/leak/<UTC yyyy-mm-dd-HHMMSS>/`, which housekeeping never removes.
+
+### SM-1 with the real model (Story 3.13, part B)
+
+`python3 -m gmshield_ci sm1` (`gmshield_ci/sm1.py`) runs part A's leak test against the deployed stack, with the
+real model, as the signed-in GM. It is not a pipeline stage: part A is the per-run gate. Through the backend's public
+API (`quality/sm1/runner.py`, in-process, in its session-given mode: no sign-in) it builds part A's library in the
+account under run-suffixed names, for example "Vale de Ferro · sm1 2026-11-23 0130" and "Casa · sm1 2026-11-23 0130",
+so the account's other systems never collide: `R` in "Vale de Ferro", `HA` in "Casa", `NB` in "Livro", `X` in "Mar de
+Cinzas", the same PDFs as part A. Scopes stay at their defaults, so the account's other systems sit in the "other"
+tier, which is off, and model knowledge is off. It asks the 40 questions of `quality/sm1/questions.json` in both
+campaigns, one at a time, each in a new questions conversation (300 s each, then the turn is stopped). Then it reads
+each material's passage ids through the owner-review page view (`GET /api/v1/materials/{id}/pages/{p}?ground=review`,
+every page; no database access), puts the account's current campaign back, and deletes the run's two systems through
+the recorded system deletion (Story 3.1 part B: their campaigns, materials and conversations go with them), after a
+failure too. `--keep` keeps them for diagnosis; the summary then names what was kept. Names carry the start time
+to the second, so a rerun never collides with a kept or still-deleting library.
+
+It holds the CI poll lock for its whole run, so no pipeline run starts meanwhile: a deploy would recreate the
+containers whose logs it reads.
+
+Any failed check fails the run:
+
+| Check | Passes when |
+|---|---|
+| 1. Found and fetched | the ids of each turn's `retrieval.search_done` lines in the worker's log stay inside its campaign's allowed set; the job is matched to the turn through the backend's `conversation.history_read` line (jobId, turnId); a `done` turn with no such line fails |
+| 2. Cited | every `citation` id and every `done` reference id is inside the allowed set |
+| 3. Clean ends | every turn ends in `done`; `scope.passage_refused` counts as a found leak; other errors (and stopped or timed-out turns) are counted by code, and more than 4 of 80 fail the run, since rate limits may refuse a few |
+| 4. Not restated | no Livro answer holds an `HA` marker or house-only phrase (for example "triplicado", where the book says "dobrado"), no Casa answer an `NB` marker, and neither campaign's answers an `X` marker |
+| 5. Livro never mentions the house rule | check 4 for Livro and `HA`, reported on its own line, naming each question and marker |
+| 6. Not empty | at least 20 of Casa's 24 house answers cite `HA`, and at least 6 of Livro's 8 notes answers cite `NB` |
+
+The markers and phrases live in `quality/sm1/markers.json`: words of the invented library (and their English
+translations for the English questions), never answer text, none of them in a question or in a material the
+campaign may use. Matching folds case, accents and whitespace and matches at the start of a word, so a stem
+("tripl": triplicado, triplica, triplo, triple) covers the inflections. An answer that paraphrases a material without
+any listed word is not caught. Each answer's text is read from its `delta` events in memory, matched, and dropped:
+only the terms found are kept.
+
+A `done` turn the logs do not show (no `conversation.history_read` line for its job, or no `retrieval.search_done`
+line) fails check 1 as "cannot check", not as a leak, and so does an unreadable log or a material whose passage ids
+could not be read. The logs are read from 10 minutes before the start with `docker logs --timestamps --since`; when a
+log's oldest line is later than the run's start, the result and summary call it possibly truncated (production
+rotates logs at 3 x 10 MB).
+
+Exit status: 0 when every check passes; 1 when one fails, or when a pipeline run holds the poll lock (it says "try
+again" and makes nothing); 2 when it cannot start (no session file, a stale session: nothing is made, and it says how
+to sign in) or when the runner stopped before every question was asked (the result is written, marked incomplete,
+and the library is still deleted). A leak or a restatement fails the run even when it stopped early. If the GM's
+session ends mid-run (a `session.*` refusal), the run stops at once; the library then cannot be deleted, and the
+summary names the systems to delete by hand.
+
+To stop a run, `kill <pid>` (SIGTERM) or Ctrl-C: it stops asking, puts the current campaign back, deletes the
+library and writes the result (marked incomplete). Do not `kill -9`, which leaves the library in the account.
+
+Before a run:
+
+1. The release is deployed and its indexing has finished.
+2. Dalton signs in with Google in the browser and saves the session cookie's token, the part before the last `.`,
+   on the server: `install -D -m 600 /dev/null ~/.config/gmshield/sm1-session`, then paste it into that file. The
+   run renews the session first (a refused renewal stops it before anything is made) and before each renewal is due,
+   and writes each new token back to the file (mode 600).
+3. Close the GMshield browser tab without signing out, and do not use the app during the run: after the runner
+   renews, a browser call with the old token ends the session the two share; the run also changes the current
+   campaign while it waits for indexing (it puts it back at the end).
+4. Start it detached, as `docs/CI-CD-RESULTS.md` shows. It takes the library's ingestion, then 80 questions times the
+   answer time, then up to 15 minutes for the backend to log each system's deletion as finished.
+
+After the run, delete the session file or sign out in the browser.
+
+Options: `--backend-container` and `--network` (defaults `gmshield-backend`, `gmshield-app`; `gm27-backend` and
+`gm27-app` for a temporary develop stack, whose worker is then `gm27-worker`), `--session-file`, `--keep`. The
+backend's address and the frontend's service credential are read from the container (`docker inspect`, as `sm2`);
+the credential is never printed or written. The backend's and worker's logs since the run started are read with
+`docker logs --since` and held in memory only.
+
+The result goes to `~/gmshield-ci/artifacts/quality/sm1/<UTC yyyy-mm-dd-HHMMSS>-<backend release>/`: `result.json`
+(every check's verdict and failures; per turn its ids, how it ended, the materials it cited and the library terms it
+held; each material's passage count; the deletion: kept, each system's delete and whether the backend logged it
+finished; the release tags of the backend, frontend and worker, resolved as `sm2` does; timings) and `summary.md`.
+It holds no answer text and no passage text. Housekeeping never removes these folders. A failing first run is
+recorded, not fixed by the run's story: missed gates become a new story.
 
 ### Housekeeping (disk space)
 
