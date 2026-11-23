@@ -41,7 +41,8 @@ SECRETS = ("ANSWER-SECRET", "NAME-SECRET")
 
 
 def record_run(tmp: Path, **behaviour):
-    """One runner run against the stub: (exit code, record, passages, turns, worker log, the stub's state)."""
+    """One runner run against the stub: (exit code, record, passages, turns, worker log, the stub's state); with
+    `records=True` (Story 4.3 part C) the stub's state also holds its records (`state.record_rows`)."""
     tmp.mkdir(parents=True, exist_ok=True)
     with stub.Backend(**behaviour) as backend:
         cfg = leak.runner_config(600)
@@ -416,6 +417,62 @@ class MappingTest(Recorded):
         self.assertEqual(leak.found_ids(log), {"j": {"a", "b"}, "k": set()})
 
 
+class RecordsTest(unittest.TestCase):
+    """Story 4.3 part C: a record's id stands for its material, as a passage's does: an answer that finds or cites a
+    record of a material out of its campaign's scope is a leak; one within it is clean."""
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp())
+        cls.rc, cls.rec, cls.passages, cls.turns, cls.log, cls.state = record_run(cls.tmp / "clean", records=True)
+        cls.records = dict(cls.state.record_rows)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def record_of(self, key: str) -> str:
+        version = self.rec["materials"][key]["versionId"]
+        return next(r for r, v in self.records.items() if v == version)
+
+    def test_a_clean_run_citing_records_passes_and_counts_them(self):
+        result = leak.judge(copy.deepcopy(self.rec), self.passages, self.turns, leak.found_ids(self.log),
+                            records=self.records)
+        self.assertEqual((result["verdict"], result["reason"]), ("passed", "80/80 clean, control ok"))
+        self.assertEqual({k: m["records"] for k, m in result["materials"].items()}, {"R": 1, "HA": 1, "NB": 1, "X": 1})
+        casa = next(t for t in self.rec["turns"] if t["campaign"] == "casa" and t["phase"] == "main")
+        self.assertIn(self.record_of("HA"), casa["citations"])
+        self.assertTrue(any(self.record_of("HA") in ref for ref in casa["references"]))
+
+    def test_without_the_record_table_a_cited_record_is_an_unknown_leak(self):
+        result = leak.judge(copy.deepcopy(self.rec), self.passages, self.turns, leak.found_ids(self.log))
+        self.assertEqual(result["verdict"], "failed")
+        self.assertTrue(result["reason"].startswith("leak found: Casa q01 unknown:"), result["reason"])
+
+    def test_a_record_of_another_campaigns_material_cited_is_a_leak(self):
+        rec = copy.deepcopy(self.rec)
+        ha = self.record_of("HA")
+        turn = next(t for t in rec["turns"] if (t["campaign"], t["question"]) == ("livro", "q07"))
+        turn["citations"].append(ha)
+        result = leak.judge(rec, self.passages, self.turns, leak.found_ids(self.log), records=self.records)
+        self.assertEqual((result["verdict"], result["reason"]), ("failed", f"leak cited: Livro q07 HA:{ha}"))
+
+    def test_a_record_of_another_campaigns_material_found_is_a_leak(self):
+        tmp = self.tmp / "found"
+        _, rec, passages, turns, log, state = record_run(tmp, records=True, leak="casa-regras", found_only=True)
+        rows = dict(state.record_rows)
+        result = leak.judge(rec, passages, turns, leak.found_ids(log), records=rows)
+        self.assertEqual(result["verdict"], "failed")
+        ha = next(r for r, v in rows.items() if v == rec["materials"]["HA"]["versionId"])
+        livro = [f for f in result["failures"] if f["check"] == "found" and f["campaign"] == "Livro"]
+        self.assertEqual(len(livro), 40)
+        self.assertTrue(all(any(item == {"id": ha, "material": "HA"} for item in f["foreign"]) for f in livro))
+        self.assertNotIn("cited", {f["check"] for f in result["failures"]})
+
+    def test_found_ids_reads_the_records_of_a_done_line(self):
+        log = json.dumps({"event": "retrieval.search_done", "jobId": "j", "ids": ["a"], "records": ["r"]}) + "\n"
+        self.assertEqual(leak.found_ids(log), {"j": {"a", "r"}})
+
+
 class ResultTextTest(Recorded):
     def test_results_hold_ids_counts_and_codes_only(self):
         for rec in (self.rec, None):
@@ -465,7 +522,9 @@ class StageTest(Base):
     @classmethod
     def setUpClass(cls):
         cls.rtmp = Path(tempfile.mkdtemp())
-        _, cls.rec, cls.passages, cls.turns, cls.log, _ = record_run(cls.rtmp)
+        # Story 4.3 part C: the library's records (HA's and X's `fake:record` lines) are found and cited too.
+        _, cls.rec, cls.passages, cls.turns, cls.log, state = record_run(cls.rtmp, records=True)
+        cls.records = dict(state.record_rows)
 
     @classmethod
     def tearDownClass(cls):
@@ -490,6 +549,8 @@ class StageTest(Base):
                 return self.psql_rc, ""
             if sql == leak.PASSAGES_SQL:
                 return 0, "\n".join(f"{p},{v}" for p, v in self.passages.items())
+            if sql == leak.RECORDS_SQL:              # Story 4.3 part C: the records, as the passages
+                return 0, "\n".join(f"{r},{v}" for r, v in self.records.items())
             return 0, "\n".join(f"{t},{d['job']},{d['campaign']}" for t, d in self.turns.items())
         return self.fake_capture(cmd, timeout)
 
@@ -516,6 +577,10 @@ class StageTest(Base):
         saved = json.loads((sess.dir / "result.json").read_text())
         self.assertEqual((saved["verdict"], saved["outcome"], saved["shas"]["backend"]), ("passed", "ok", OWN_SHA))
         self.assertIn("**PASSED**", (sess.dir / "summary.md").read_text())
+        # Story 4.3 part C: the records are read from Postgres beside the passages and the turns, and counted.
+        self.assertIn(leak.RECORDS_SQL, [c[-1] for c in self.cmds if c[:2] == ["docker", "exec"]])
+        self.assertEqual({k: v["records"] for k, v in saved["materials"].items()}, {"R": 1, "HA": 1, "NB": 1, "X": 1})
+        self.assertIn("Records: R 1, HA 1, NB 1, X 1", (sess.dir / "summary.md").read_text())
         names = [c[0] for c in docker.calls]
         self.assertEqual(names, ["leak-postgres", "leak-redis", "leak-stand-in-qdrant", "leak-stand-in-ollama",
                                  "leak-probe", "leak-probe", "probe", "probe", "leak-runner"])

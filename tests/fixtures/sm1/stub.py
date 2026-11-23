@@ -23,6 +23,13 @@ conversation.history_read line), `end_session_after` (the session ends, every to
 exist), `current_status` (the status GET /api/v1/campaigns/current answers instead of 200). It serves the owner-review page view (two pages per material, one
 passage each), the system deletion and its preview, and `backend_log()` (conversation.history_read lines with a decoy
 of another account's job, and library.system_deleted). `requests` counts every request.
+
+Story 4.3 part C: each system's record types and their records lists (one `spell` type per system, its records those of
+the system's materials and of its campaigns' materials, each naming its material as GET /api/v1/materials/{id} names
+it), empty unless `records` is on. With `records`, each material also gets one record (`records()`: {record id:
+version id}, as Postgres' record table), each turn finds its scope's records (the `records` of its
+retrieval.search_done line) and cites each with a record citation event and a record reference; `leak` and
+`found_only` treat the leaked material's record as its passages.
 """
 from __future__ import annotations
 
@@ -44,7 +51,7 @@ def _id() -> str:
 class State:
     def __init__(self, leak=None, found_only=False, error=None, stopped=(), renew_after=900, cite_only=None,
                  given=None, current=None, say=None, deleted_log=True, no_job_log=(), no_history=(),
-                 end_session_after=None, current_status=None):
+                 end_session_after=None, current_status=None, records=False):
         self.lock = threading.Lock()
         self.say, self.deleted_log, self.no_job_log = say or {}, deleted_log, set(no_job_log)
         self.no_history, self.end_session_after, self.current_status = set(no_history), end_session_after, current_status
@@ -62,6 +69,8 @@ class State:
         self.materials: dict[str, dict] = {}              # id -> {key, version, campaign | systems, state, polls}
         self.uploads: dict[str, dict] = {}
         self.passage_rows: dict[str, str] = {}            # passage id -> version id
+        self.with_records = records
+        self.record_rows: dict[str, str] = {}             # record id -> version id (Story 4.3 part C)
         self.turn_rows: dict[str, dict] = {}              # turn id -> {job, campaign, events}
         self.log_lines: list[str] = []
         self.current: str | None = current
@@ -79,14 +88,23 @@ class State:
             return "system"
         return "other"
 
-    def allowed(self, campaign_id: str) -> list[str]:
+    def allowed(self, campaign_id: str, rows: dict[str, str] | None = None) -> list[str]:
+        """The ids of `rows` (the passages by default; the records, Story 4.3 part C) the campaign's scope allows."""
+        rows = self.passage_rows if rows is None else rows
         scope = self.campaigns[campaign_id]["scope"]
         on = {"campaign": scope["campaignTier"], "system": scope["systemTier"], "other": scope["otherTier"]}
         out = []
         for m in self.materials.values():
             if m["state"] == "ready" and on[self.tier(campaign_id, m)]:
-                out += [p for p, v in self.passage_rows.items() if v == m["version"]]
+                out += [p for p, v in rows.items() if v == m["version"]]
         return out
+
+    def records_of_system(self, system_id: str) -> list[tuple[str, dict]]:
+        """(record id, material) of the system's ready materials and of its campaigns' (Story 4.3 part C)."""
+        campaigns = {cid for cid, c in self.campaigns.items() if c["system"] == system_id}
+        return [(r, m) for r, v in self.record_rows.items() for m in self.materials.values()
+                if m["version"] == v and m["state"] == "ready"
+                and (system_id in m.get("systems", []) or m.get("campaign") in campaigns)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -205,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
             st.materials[mid] = m
             for _ in range(2):
                 st.passage_rows[_id()] = vid
+            if st.with_records:
+                st.record_rows[_id()] = vid
             self._send(201, {"materialId": mid, "versionId": vid, "state": "waiting"})
         elif path.startswith("/api/v1/materials/") and path.endswith("/accept"):
             self._body()
@@ -308,6 +328,22 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(200, {"campaigns": 1, "conversations": 0, "materials": 1})
             return
+        if parts[:3] == ["api", "v1", "systems"] and len(parts) == 5 and parts[4] == "record-types":
+            if parts[3] not in st.systems or parts[3] in st.deleting:
+                self._problem(404, "request.not_found")
+                return
+            n = len(st.records_of_system(parts[3]))
+            self._send(200, {"items": [{"id": f"type-{parts[3]}", "core": "spell", "name": "spell", "records": n,
+                                        "version": 0}], "total": 1})
+            return
+        if parts[:3] == ["api", "v1", "record-types"] and len(parts) == 5 and parts[4] == "records":
+            sid = parts[3].removeprefix("type-")
+            query = dict(item.split("=", 1) for item in url.query.split("&") if "=" in item)
+            limit, offset = int(query.get("limit", "20")), int(query.get("offset", "0"))
+            found = st.records_of_system(sid)
+            self._send(200, {"items": [{"id": r, "name": "NAME-SECRET", "materialName": f"NAME-SECRET {m['key']}",
+                                        "page": 1} for r, m in found[offset:offset + limit]], "total": len(found)})
+            return
         if path.startswith("/api/v1/materials/"):
             m = st.materials.get(path.split("/")[4])
             if m is None:
@@ -318,7 +354,7 @@ class Handler(BaseHTTPRequestHandler):
                 m["state"] = "processing"
             elif m["state"] == "processing":
                 m["state"] = "needs_review"
-            self._send(200, {"id": path.split("/")[4], "state": m["state"], "name": "NAME-SECRET"})
+            self._send(200, {"id": path.split("/")[4], "state": m["state"], "name": f"NAME-SECRET {m['key']}"})
         elif path == "/api/v1/conversations/current":
             st.indexing_polls += 1
             pending = st.indexing_polls % 2 == 1
@@ -347,6 +383,12 @@ class Handler(BaseHTTPRequestHandler):
                       for m in st.materials.values() if m["version"] == v and m["key"].startswith(st.leak)]
         found = ids + leaked
         cited = ids + ([] if st.found_only else leaked)
+        # Story 4.3 part C: the scope's records (and the leaked material's) are found and cited as passages are.
+        records = st.allowed(cid, st.record_rows)
+        if st.leak and livro:
+            records += [r for r, v in st.record_rows.items()
+                        for m in st.materials.values() if m["version"] == v and m["key"].startswith(st.leak)]
+        cited_records = [r for r in records if not st.found_only or r in st.allowed(cid, st.record_rows)]
         if q not in st.no_history:
             st.backend_lines.append(json.dumps({"timestamp": "2026-11-22T12:00:00.000Z", "level": "INFO",
                                                 "event": "conversation.history_read", "jobId": job, "turnId": tid,
@@ -354,7 +396,8 @@ class Handler(BaseHTTPRequestHandler):
         if q not in st.no_job_log:
             st.log_lines.append("2026-11-22T12:00:00.000000000Z " + json.dumps(
             {"timestamp": "2026-11-22T12:00:00.000Z", "level": "INFO", "unit": "lane.answer",
-             "event": "retrieval.search_done", "jobId": job, "tiers": 2, "handed": len(found), "ids": found}))
+             "event": "retrieval.search_done", "jobId": job, "tiers": 2, "handed": len(found), "ids": found,
+             "records": records}))
         events = [("delta", {"text": "ANSWER-SECRET "})]
         events += [("delta", {"text": piece}) for piece in st.say.get(st.campaigns[cid]["name"].split(" · ")[0], {})
                    .get(q, [])]
@@ -364,13 +407,20 @@ class Handler(BaseHTTPRequestHandler):
             extra = [p for p, v in st.passage_rows.items() for m in st.materials.values()
                      if livro and st.cite_only and m["version"] == v and m["key"].startswith(st.cite_only)]
             events += [("citation", {"passageId": p, "offset": i}) for i, p in enumerate(cited + extra)]
+            events += [("citation", {"recordId": r, "offset": 0}) for r in cited_records]
             refs = {}
             for p in cited:
                 refs.setdefault(st.passage_rows.get(p), []).append(p)
-            events.append(("done", {"stopped": q in st.stopped, "silent": not cited, "modelKnowledge": False,
-                                    "references": [{"number": n, "page": 1, "passageIds": v, "removed": False,
-                                                    "sectionPath": [], "materialName": "NAME-SECRET"}
-                                                   for n, v in enumerate(refs.values(), 1)]}))
+            references = [{"number": n, "kind": "passage", "page": 1, "passageIds": v, "removed": False,
+                           "sectionPath": [], "materialName": "NAME-SECRET"} for n, v in enumerate(refs.values(), 1)]
+            for r in cited_records:
+                own = sorted(p for p, v in st.passage_rows.items() if v == st.record_rows[r])[:1]
+                references.append({"number": len(references) + 1, "kind": "record", "recordId": r,
+                                   "recordType": "spell", "name": "NAME-SECRET", "fields": [], "page": 1,
+                                   "passageIds": own, "removed": False, "sectionPath": [],
+                                   "materialName": "NAME-SECRET"})
+            events.append(("done", {"stopped": q in st.stopped, "silent": not cited and not cited_records,
+                                    "modelKnowledge": False, "references": references}))
         st.turn_rows[tid] = {"job": job, "campaign": cid, "events": events}
         if st.end_session_after is not None and len(st.turn_rows) >= st.end_session_after:
             st.tokens.clear()
@@ -415,6 +465,10 @@ class Backend:
     # what the gate reads besides the API
     def passages(self) -> dict[str, str]:
         return dict(self.state.passage_rows)
+
+    def records(self) -> dict[str, str]:
+        """As Postgres' record table (Story 4.3 part C): {record id: version id}."""
+        return dict(self.state.record_rows)
 
     def turns(self) -> dict[str, dict]:
         return {t: {"job": r["job"], "campaign": r["campaign"]} for t, r in self.state.turn_rows.items()}

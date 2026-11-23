@@ -345,7 +345,12 @@ FR-23). It has no gate key, like `e2e`, and its own column (`Leak`) on the dashb
 - **The checks.** The stage reads each material's passage ids from Postgres (by the version id its upload
   returned), maps each turn's job to its conversation's campaign (`turn.job_id` →
   `conversation.campaign_id`), and reads the ids each job found and fetched from the worker's
-  `retrieval.search_done` log lines. Any failed check fails the run:
+  `retrieval.search_done` log lines. From Story 4.3 part C answers also find and cite records: the stage reads each
+  material's record ids from Postgres too (`select id, version_id from record`), a record id stands for its material
+  as a passage id does, and a line's `records` (the record ids the job read) are checked with its `ids`; a record
+  citation and a record reference's record id are checked like a passage's. The library holds records for this:
+  `HA` (two `fake:record` lines, so Casa finds and cites house records) and `X` (one, never in either campaign's
+  scope), which the fake model's records step extracts. Any failed check fails the run:
 
   | Check | Passes when |
   |---|---|
@@ -405,11 +410,16 @@ campaign may use. Matching folds case, accents and whitespace and matches at the
 any listed word is not caught. Each answer's text is read from its `delta` events in memory, matched, and dropped:
 only the terms found are kept.
 
+From Story 4.3 part C answers also find and cite records: after the questions the runner reads each material's record
+ids from its systems' record lists (`GET /api/v1/systems/{id}/record-types`, then each type's records, matched to the
+material by its name; `recordIds`), so a record id found (a `search_done` line's `records`) or cited stands for its
+material as a passage id does. The result and summary count each material's records.
+
 A `done` turn the logs do not show (no `conversation.history_read` line for its job, or no `retrieval.search_done`
-line) fails check 1 as "cannot check", not as a leak, and so does an unreadable log or a material whose passage ids
-could not be read. The logs are read from 10 minutes before the start with `docker logs --timestamps --since`; when a
-log's oldest line is later than the run's start, the result and summary call it possibly truncated (production
-rotates logs at 3 x 10 MB).
+line) fails check 1 as "cannot check", not as a leak, and so does an unreadable log, a material whose passage ids
+could not be read, or record lists that could not be read (`recordIdsError`: "record ids unread"). The logs are read
+from 10 minutes before the start with `docker logs --timestamps --since`; when a log's oldest line is later than the
+run's start, the result and summary call it possibly truncated (production rotates logs at 3 x 10 MB).
 
 Exit status: 0 when every check passes; 1 when one fails, or when a pipeline run holds the poll lock (it says "try
 again" and makes nothing); 2 when it cannot start (no session file, a stale session: nothing is made, and it says how

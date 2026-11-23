@@ -20,15 +20,17 @@ config.json (written by the pipeline): {"base", "credential", "code", "username"
    then turns the tier off again.
 
 The record (`out`, runner.json) holds ids, counts, codes, scope versions and timings: each turn's id, its citations'
-passage ids, its references' passage ids, its last event id and how it ended. Never a question's answer or a
-passage's text, and no name. Exit status 0 when every step ran (whatever the answers), 2 when the run stopped; the
-record then says where (`error`).
+passage ids, its references' passage ids, its last event id and how it ended. From Story 4.3 part C a citation may
+name a record (its id is recorded among the citations) and a record reference adds its record's id to its ids.
+Never a question's answer or a passage's text, and no name. Exit status 0 when every step ran (whatever the
+answers), 2 when the run stopped; the record then says where (`error`).
 
 Part B (Story 3.13, `gmshield_ci sm1`, the real model on roberto-server) runs it in-process through `run_all`, with
 these keys besides: "session" ({token, file}: a signed-in GM's session, so there is no sign-in; each renewed token is
 written back to the file, mode 600), "suffix" (added to every system and campaign name, " · <suffix>"), "markers"
 ({material key: [terms]}: each answer's text is read from its delta events in memory, matched, and dropped; only the
-terms found are recorded), "pageIds" (each material's passage ids read through the owner-review page view), "delete"
+terms found are recorded), "pageIds" (each material's passage ids read through the owner-review page view, and from
+Story 4.3 part C its record ids, `recordIds`, read from its systems' record lists by the material's name), "delete"
 (the run's systems deleted at the end, after a failure too) and no "control". The account's current campaign is put
 back as it was before the deletion.
 """
@@ -285,6 +287,37 @@ def page_ids(api: Api, key: str, material_id: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+def material_name(api: Api, material_id: str) -> str:
+    """The material's name, as its records list names it (never recorded)."""
+    api.renew_if_due()
+    return str(api.expect(api.call("GET", f"/api/v1/materials/{material_id}"), 200, "material").get("name"))
+
+
+def record_ids(api: Api, system_ids: list[str]) -> dict[str, list[str]]:
+    """{material name: its record ids} (Story 4.3 part C): every record of the systems' record types (each system's
+    records list holds the records of its materials and of its campaigns' materials), by the material it names."""
+    out: dict[str, list[str]] = {}
+    for sid in system_ids:
+        api.renew_if_due()
+        types = api.expect(api.call("GET", f"/api/v1/systems/{sid}/record-types?limit=50"), 200, "record types")
+        for kind in types.get("items") or []:
+            if not isinstance(kind, dict) or not kind.get("id"):
+                continue
+            offset = 0
+            while True:
+                api.renew_if_due()
+                path = f"/api/v1/record-types/{kind['id']}/records?limit=50&offset={offset}"
+                page = api.expect(api.call("GET", path), 200, "records")
+                rows = [r for r in page.get("items") or [] if isinstance(r, dict) and r.get("id")]
+                for r in rows:
+                    out.setdefault(str(r.get("materialName")), []).append(str(r["id"]))
+                offset += len(rows)
+                total = page.get("total") if isinstance(page.get("total"), int) else 0
+                if not rows or offset >= total:
+                    break
+    return out
+
+
 def choose(api: Api, campaign_id: str) -> None:
     api.expect(api.call("PUT", "/api/v1/campaigns/current", {"campaignId": campaign_id}), 200, "campaign choice")
 
@@ -428,11 +461,13 @@ def _ask(api: Api, t: Turn, campaign_id: str, question: str, limit: float, words
         if name == "delta" and words is not None and isinstance(body.get("text"), str):
             words.append(body["text"])
         elif name == "citation":
-            t.citations.append(str(body.get("passageId")))
+            # Story 4.3 part C: a citation names a passage or a record.
+            t.citations.append(str(body.get("recordId") or body.get("passageId")))
         elif name == "done":
             t.ended, done = "done", True
             t.stopped, t.silent = bool(body.get("stopped")), bool(body.get("silent"))
             t.references = [[str(i) for i in ref.get("passageIds") or []]
+                            + ([str(ref["recordId"])] if ref.get("recordId") else [])
                             for ref in body.get("references") or [] if isinstance(ref, dict)]
             return True
         elif name == "error":
@@ -635,6 +670,12 @@ def finish(cfg: dict, record: dict, api: Api, limits: dict) -> None:
                 m["passageIds"] = page_ids(api, key, m["materialId"])
             except Exception as e:  # noqa: BLE001 - recorded; the deletion must still run
                 m["passageIdsError"] = _reason(e)
+        try:
+            by_name = record_ids(api, list(record["systems"].values()))
+            for key, m in record["materials"].items():
+                m["recordIds"] = by_name.get(material_name(api, m["materialId"]), [])
+        except Exception as e:  # noqa: BLE001 - recorded; the deletion must still run
+            record["recordIdsError"] = _reason(e)
     if record["systems"]:
         if cfg.get("delete"):
             record["deletion"] = delete_library(api, record, limits)
