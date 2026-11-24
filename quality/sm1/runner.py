@@ -293,14 +293,28 @@ def material_name(api: Api, material_id: str) -> str:
     return str(api.expect(api.call("GET", f"/api/v1/materials/{material_id}"), 200, "material").get("name"))
 
 
+def record_types(api: Api, system_id: str) -> list[dict]:
+    """Every record type of the system (Story 4.4 part B), 50 a page by `offset` until its `total`."""
+    found: list[dict] = []
+    while True:
+        api.renew_if_due()
+        path = f"/api/v1/systems/{system_id}/record-types?limit=50&offset={len(found)}"
+        page = api.expect(api.call("GET", path), 200, "record types")
+        rows = [kind for kind in page.get("items") or [] if isinstance(kind, dict)]
+        found += rows
+        total = page.get("total") if isinstance(page.get("total"), int) else 0
+        if not rows or len(found) >= total:
+            return found
+
+
 def record_ids(api: Api, system_ids: list[str]) -> dict[str, list[str]]:
     """{material name: its record ids} (Story 4.3 part C): every record of the systems' record types (each system's
-    records list holds the records of its materials and of its campaigns' materials), by the material it names."""
+    records list holds the records of its materials and of its campaigns' materials), by the material it names. Story
+    4.4 part B: a system may have more than 50 record types (the core ones and those the GM approved), so its list is
+    read page by page (`offset`, up to its `total`)."""
     out: dict[str, list[str]] = {}
     for sid in system_ids:
-        api.renew_if_due()
-        types = api.expect(api.call("GET", f"/api/v1/systems/{sid}/record-types?limit=50"), 200, "record types")
-        for kind in types.get("items") or []:
+        for kind in record_types(api, sid):
             if not isinstance(kind, dict) or not kind.get("id"):
                 continue
             offset = 0

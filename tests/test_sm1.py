@@ -588,6 +588,21 @@ class RunnerPartsTest(unittest.TestCase):
             with self.assertRaises(runner.Stop):
                 runner.page_ids(api, "k", "missing")
 
+    def test_record_ids_read_every_page_of_the_record_types_an_approved_one_included(self):
+        # Story 4.4 part B: 53 types, the records all of the approved `talento` on the second page.
+        with stub.Backend(given=GIVEN) as backend:
+            st = backend.state
+            api = runner.Api(backend.base, stub.FRONTEND, token=GIVEN, renew_at=float("inf"))
+            sid = runner.Api.expect(api, api.call("POST", "/api/v1/systems", {"name": "vale"}), 201, "s")["id"]
+            st.materials["m1"] = {"key": "k", "version": "v1", "state": "ready", "polls": 0, "systems": [sid]}
+            st.record_rows.update({"r1": "v1", "r2": "v1"})
+            kinds = runner.record_types(api, sid)
+            found = runner.record_ids(api, [sid])
+        self.assertEqual(len(kinds), 53)
+        self.assertEqual(kinds[-1]["key"], "talento")
+        self.assertIsNone(kinds[-1]["core"])
+        self.assertEqual(found, {"NAME-SECRET k": ["r1", "r2"]})
+
     def test_a_session_given_run_never_signs_in(self):
         with stub.Backend(given=GIVEN) as backend:
             api = runner.make_api({"base": backend.base, "credential": stub.FRONTEND,
